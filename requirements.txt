@@ -7,8 +7,14 @@ speechbrain>=0.5.0
 pyannote.audio>=3.1.0
 openai-whisper>=20231117
 
-# Vector database
+# Vector database and embeddings
 pinecone>=3.0.0
+grpcio>=1.60.0
+grpcio-tools>=1.60.0
+googleapis-common-protos>=1.62.0
+
+# Embedding models
+cohere>=5.0.0
 
 # Environment and configuration
 python-dotenv>=1.0.0
@@ -29,6 +35,9 @@ datasets>=2.12.0
 numpy>=1.24.0
 pandas>=2.0.0
 tqdm>=4.65.0
+
+# Text processing and NLP
+regex>=2023.0.0
 
 # Windows-specific audio dependencies (alternative to librosa)
 # ffmpeg-python>=0.2.0  # Uncomment if needed for audio processing
