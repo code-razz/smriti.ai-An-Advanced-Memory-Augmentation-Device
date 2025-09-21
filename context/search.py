@@ -18,7 +18,8 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(PINECONE_INDEX)
 
 # Search query
-query = "What did I eat with my friend?"
+# query = "What did I eat with my friend?"
+query = "What English Vocabulary is good?"
 # query = "What did the user say about the medicine and doctor?"
 
 # Embed query (✅ FIXED)

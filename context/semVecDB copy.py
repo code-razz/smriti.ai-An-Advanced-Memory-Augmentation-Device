@@ -3,7 +3,8 @@ import uuid
 from dotenv import load_dotenv
 import cohere
 from pinecone import Pinecone, ServerlessSpec
-from conversation_chunks2 import conversation_chunks
+# Import conversation chunks from the chunker module
+from chunker_from_stt_diarization import conversation_chunks
 
 # Load credentials from .env
 load_dotenv()
@@ -29,7 +30,12 @@ if not pc.has_index(PINECONE_INDEX):
 
 index = pc.Index(PINECONE_INDEX)
 
-# === Step 1: Embed documents ===
+# === Step 1: Validate and prepare documents ===
+if not conversation_chunks:
+    print("❌ No conversation chunks found. Please run chunker_from_stt_diarization.py first.")
+    exit(1)
+
+print(f"📝 Processing {len(conversation_chunks)} conversation chunks...")
 texts = [chunk["text"] for chunk in conversation_chunks]
 # ids = [f"chunk-{i+1}" for i in range(len(conversation_chunks))]
 
@@ -39,23 +45,41 @@ embeddings = co.embed(
     model="embed-english-v3.0"
 ).embeddings
 
+print(f"🔢 Generated {len(embeddings)} embeddings")
+
 
 # === Step 2: Build vectors with metadata ===
+print("🔨 Building vectors with metadata...")
 vectors = []
 for i, (chunk, embedding) in enumerate(zip(conversation_chunks, embeddings)):
+    # Create unique ID for each chunk to avoid overwriting
+    chunk_id = f"{chunk['metadata'].get('conversation_id', 'unknown')}_chunk_{i+1}"
     vectors.append({
-        "id": chunk["metadata"].get("conversation_id"),  # Use conversation_id or fallback to chunk-{i+1}
+        "id": chunk_id,
         "values": embedding,
         "metadata": {
             **chunk["metadata"],
-            "text": chunk["text"]
+            "text": chunk["text"],
+            "chunk_index": i + 1  # Add chunk index for reference
         }
     })
 
+print(f"📦 Built {len(vectors)} vectors ready for upload")
+print("🔍 Sample vector IDs:")
+for i, vector in enumerate(vectors[:3]):  # Show first 3 IDs
+    print(f"  - {vector['id']}")
+if len(vectors) > 3:
+    print(f"  ... and {len(vectors) - 3} more")
+
 # === Step 3: Upsert to Pinecone ===
+print("🚀 Uploading vectors to Pinecone...")
 index.upsert(
     vectors=vectors,
     namespace=NAMESPACE
 )
 
 print(f"✅ Successfully embedded and upserted {len(vectors)} chunks into Pinecone (namespace: '{NAMESPACE}')")
+
+# Example run if module executed
+if __name__ == "__main__":
+    print("🎉 Semantic vector database setup complete!")

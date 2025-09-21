@@ -86,7 +86,8 @@ def chunk_conversation_from_func(
     conversation_getter: Callable[[], str],
     max_chars: int = 900,
     tz_name: str = "Asia/Kolkata",
-    out_filename: str = "created_conversation_chunks.py"
+    out_filename: str = "created_conversation_chunks.txt",
+    write_to_file: bool = True
 ) -> List[Dict]:
     """
     Produce conversation_chunks list of dicts like the sample, print them,
@@ -172,31 +173,18 @@ def chunk_conversation_from_func(
     # flush any remaining lines
     flush_buffer()
 
-    # Write to file as Python code in the same directory as this script
-    try:
-        # Get the directory where this script is located
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        output_path = os.path.join(script_dir, out_filename)
-        
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write("conversation_chunks = [\n")
-            for i, chunk in enumerate(conversation_chunks):
-                f.write("    {\n")
-                f.write(f'        "text": """{chunk["text"]}""",\n')
-                f.write("        \"metadata\": {\n")
-                for key, value in chunk["metadata"].items():
-                    if isinstance(value, str):
-                        f.write(f'            "{key}": "{value}",\n')
-                    else:
-                        f.write(f'            "{key}": {json.dumps(value)},\n')
-                f.write("        }\n")
-                f.write("    }")
-                if i < len(conversation_chunks) - 1:
-                    f.write(",")
-                f.write("\n")
-            f.write("]\n")
-    except Exception as e:
-        print("Warning: failed to write file:", e)
+    # Write to file as JSON in the same directory as this script (if requested)
+    if write_to_file:
+        try:
+            # Get the directory where this script is located
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            output_path = os.path.join(script_dir, out_filename)
+            
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(conversation_chunks, f, ensure_ascii=False, indent=4)
+            print(f"Wrote {len(conversation_chunks)} chunks to '{out_filename}'")
+        except Exception as e:
+            print("Warning: failed to write file:", e)
 
     # Print chunks summary (matching sample style)
     for idx, ch in enumerate(conversation_chunks, start=1):
@@ -205,7 +193,6 @@ def chunk_conversation_from_func(
         print("metadata:", ch["metadata"])
         print()
 
-    print(f"Wrote {len(conversation_chunks)} chunks to '{out_filename}'")
     return conversation_chunks
 
 def default_get_conversation() -> str:
@@ -224,6 +211,13 @@ User: Great, I need to take it after dinner.
 Alex: Remember, the doctor said to avoid coffee.
 User: Got it. I’ll skip the coffee tonight.
 Alex: That’s good. Better safe than sorry."""
+# Generate conversation chunks and make them available for import
+conversation_chunks = chunk_conversation_from_func(default_get_conversation, max_chars=900, write_to_file=True)
+
 # Example run if module executed
 if __name__ == "__main__":
-    chunks = chunk_conversation_from_func(default_get_conversation, max_chars=900)
+    # When run directly, also write to file
+    chunks_with_file = chunk_conversation_from_func(default_get_conversation, max_chars=900, write_to_file=True)
+    print(f"Generated {len(chunks_with_file)} conversation chunks")
+    print("Chunks are available as 'conversation_chunks' variable for import")
+    print(f"Chunks saved to 'created_conversation_chunks.txt' in the context folder")
