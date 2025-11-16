@@ -17,33 +17,49 @@ co = cohere.Client(COHERE_API_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(PINECONE_INDEX)
 
-# Search query
-# query = "What did I eat with my friend?"
-query = "What English Vocabulary is good?"
-# query = "What did the user say about the medicine and doctor?"
+def get_query_and_memories():
+    # Search query
+    query = input("Ask AISmriti your question: ")
+    # query = "What did I eat with my friend?"
+    # query = "What English Vocabulary is good?"
+    # query = "What did the user say about the medicine and doctor?"
 
-# Embed query (✅ FIXED)
-query_embedding = co.embed(
-    texts=[query],
-    input_type="search_query",
-    model="embed-english-v3.0"
-).embeddings[0]
+    # Embed query (✅ FIXED)
+    query_embedding = co.embed(
+        texts=[query],
+        input_type="search_query",
+        model="embed-english-v3.0"
+    ).embeddings[0]
 
-# Query top 3
-results = index.query(
-    namespace="conversations",
-    vector=query_embedding,
-    top_k=3,
-    include_values=False,
-    include_metadata=True
-)
+    # Query top 3
+    results = index.query(
+        namespace="conversations",
+        vector=query_embedding,
+        top_k=3,
+        include_values=False,
+        include_metadata=True
+    )
 
-# Display results
-print("\n🔍 Top Matches:")
-for match in results["matches"]:
-    print(f"\nScore: {match['score']:.4f}")
-    print(f"Text: {match['metadata']['text']}")
-    print(f"Location: {match['metadata'].get('location')}")
-    print(f"Participants: {match['metadata'].get('participants')}")
-    print(f"Timestamp: {match['metadata'].get('timestamp')}")
-    print(f"Conversation ID: {match['metadata'].get('conversation_id')}")
+    # Display results
+    print("\n🔍 Top Matches:")
+    memories = []
+    for match in results["matches"]:
+        score = match["score"]
+        meta = match["metadata"]
+        memory_entry = {
+            "score": score,
+            "text": meta.get("text"),
+            "location": meta.get("location"),
+            "participants": meta.get("participants"),
+            "timestamp": meta.get("timestamp"),
+            "conversation_id": meta.get("conversation_id"),
+        }
+        memories.append(memory_entry)
+        print(f"\nScore: {match['score']:.4f}")
+        print(f"Text: {match['metadata']['text']}")
+        print(f"Location: {match['metadata'].get('location')}")
+        print(f"Participants: {match['metadata'].get('participants')}")
+        print(f"Timestamp: {match['metadata'].get('timestamp')}")
+        print(f"Conversation ID: {match['metadata'].get('conversation_id')}")
+        
+    return query, memories
