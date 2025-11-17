@@ -23,6 +23,11 @@ def get_query_and_memories():
     # query = "What did I eat with my friend?"
     # query = "What English Vocabulary is good?"
     # query = "What did the user say about the medicine and doctor?"
+    # query = "What did I eat with my friend?"
+    
+    # query = "What English Vocabulary is good?"
+    # query = "What did the user say about the medicine and doctor?"
+    # query = "Whose point was that people will be lazy?"
 
     # Embed query (✅ FIXED)
     query_embedding = co.embed(

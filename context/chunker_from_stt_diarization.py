@@ -206,11 +206,12 @@ def default_get_conversation() -> str:
     
     # Fallback to sample conversation if diarization fails
     return """User: Did you bring the medicine?
-Alex: Yes, I picked it up on the way.
-User: Great, I need to take it after dinner.
-Alex: Remember, the doctor said to avoid coffee.
-User: Got it. I’ll skip the coffee tonight.
-Alex: That’s good. Better safe than sorry."""
+        Alex: Yes, I picked it up on the way.
+        User: Great, I need to take it after dinner.
+        Alex: Remember, the doctor said to avoid coffee.
+        User: Got it. I’ll skip the coffee tonight.
+        Alex: That’s good. Better safe than sorry."""
+        
 # Generate conversation chunks and make them available for import
 conversation_chunks = chunk_conversation_from_func(default_get_conversation, max_chars=900, write_to_file=True)
 
