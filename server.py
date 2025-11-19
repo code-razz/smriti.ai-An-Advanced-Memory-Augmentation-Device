@@ -4,6 +4,37 @@ from flask_socketio import SocketIO, emit
 import wave
 import threading
 import time
+import sys
+import os
+from pathlib import Path
+
+# Add paths for importing processing modules
+project_root = Path(__file__).parent
+stt_diarization_path = project_root / "stt_diarization"
+context_path = project_root / "context"
+
+sys.path.insert(0, str(stt_diarization_path))
+sys.path.insert(0, str(context_path))
+
+# Import processing functions
+try:
+    from process_audio import process_audio_file
+    from process_audio_streaming import process_audio_segment
+    from process_chunks import process_and_store_conversation
+    PROCESSING_AVAILABLE = True
+    print("✅ Processing modules loaded successfully")
+except ImportError as e:
+    print(f"⚠️ Warning: Could not import processing modules: {e}")
+    print("⚠️ Context audio will be saved but not processed automatically.")
+    PROCESSING_AVAILABLE = False
+
+# Streaming processing configuration
+SAMPLE_RATE = 16000
+BYTES_PER_SECOND = SAMPLE_RATE * 2  # 16-bit = 2 bytes per sample, mono
+SEGMENT_DURATION_SECONDS = 50.0  # Process every 50 seconds of audio
+SEGMENT_DURATION_BYTES = int(SEGMENT_DURATION_SECONDS * BYTES_PER_SECOND)
+OVERLAP_SECONDS = 2.0  # 2 second overlap between segments for continuity
+OVERLAP_BYTES = int(OVERLAP_SECONDS * BYTES_PER_SECOND)
 
 # -----------------------------
 # Load reply WAV (16kHz, mono, 16-bit)
@@ -25,6 +56,11 @@ is_context_recording = {}        # sid -> bool: context currently active
 reply_stream_stop_flags = {}     # sid -> bool flag to tell background streamer to stop
 reply_streaming_task = {}        # sid -> task handle (if needed)
 
+# Streaming processing state
+context_processed_bytes = {}     # sid -> int: bytes already processed
+context_processing_lock = {}     # sid -> threading.Lock: prevent concurrent processing
+context_accumulated_transcript = {}  # sid -> str: accumulated transcript from all segments
+
 CHUNK_SIZE = 4096
 STREAM_DELAY = 0.04  # seconds between sending chunks (tune for latency vs jitter)
 
@@ -38,6 +74,9 @@ def on_connect():
     is_recording[sid] = False
     is_context_recording[sid] = False
     reply_stream_stop_flags[sid] = False
+    context_processed_bytes[sid] = 0
+    context_processing_lock[sid] = threading.Lock()
+    context_accumulated_transcript[sid] = ""
 
 
 @socketio.on("disconnect")
@@ -50,6 +89,9 @@ def on_disconnect():
     is_context_recording.pop(sid, None)
     reply_stream_stop_flags.pop(sid, None)
     reply_streaming_task.pop(sid, None)
+    context_processed_bytes.pop(sid, None)
+    context_processing_lock.pop(sid, None)
+    context_accumulated_transcript.pop(sid, None)
 
 
 # -----------------------------
@@ -163,6 +205,8 @@ def on_context_start():
     print(f"🟣 Received context_start from {sid} -> starting NEW context session (clearing previous buffer)")
     partial_context_audio[sid] = bytearray()
     is_context_recording[sid] = True
+    context_processed_bytes[sid] = 0
+    context_accumulated_transcript[sid] = ""
 
 
 @socketio.on("context_resume")
@@ -190,26 +234,146 @@ def on_context_pause():
 def handle_context_audio_chunk(data):
     """
     Receive PCM chunks from client while context-recording is active.
-    Only append if the server-side is_context_recording[sid] is True (safety).
+    Process segments in real-time as audio accumulates.
     """
     sid = request.sid
     if sid not in partial_context_audio:
         partial_context_audio[sid] = bytearray()
     if not is_context_recording.get(sid, False):
-        # Defensive: ignore context chunks if not marked as recording on server.
-        # In normal flow client will only send chunks while it has set recording True,
-        # but network races can happen so guard here.
         print(f"⚠️ (context) Received chunk for {sid} but server thinks context is paused; ignoring.")
         return
 
     partial_context_audio[sid].extend(data)
-    print(f"🎤 (context) Received chunk from {sid}: {len(data)} bytes (total_context={len(partial_context_audio[sid])})")
+    total_bytes = len(partial_context_audio[sid])
+    processed_bytes = context_processed_bytes.get(sid, 0)
+    unprocessed_bytes = total_bytes - processed_bytes
+    
+    # Check if we have enough unprocessed audio to process a segment
+    if unprocessed_bytes >= SEGMENT_DURATION_BYTES and PROCESSING_AVAILABLE:
+        # Process the segment in background (non-blocking)
+        socketio.start_background_task(process_context_segment_streaming, sid)
+    
+    print(f"🎤 (context) Received chunk from {sid}: {len(data)} bytes (total={total_bytes}, processed={processed_bytes})")
+
+
+def process_context_segment_streaming(sid):
+    """
+    Process a segment of context audio in real-time (streaming mode).
+    Processes accumulated audio segments as they reach the threshold duration.
+    """
+    if sid not in context_processing_lock:
+        return
+    
+    # Use lock to prevent concurrent processing of same client
+    lock = context_processing_lock[sid]
+    if not lock.acquire(blocking=False):
+        # Another processing task is already running for this client
+        return
+    
+    try:
+        audio_buffer = partial_context_audio.get(sid)
+        if not audio_buffer:
+            return
+        
+        processed_bytes = context_processed_bytes.get(sid, 0)
+        total_bytes = len(audio_buffer)
+        unprocessed_bytes = total_bytes - processed_bytes
+        
+        if unprocessed_bytes < SEGMENT_DURATION_BYTES:
+            return
+        
+        # Extract segment to process (with overlap for continuity)
+        segment_start = max(0, processed_bytes - OVERLAP_BYTES)
+        segment_end = processed_bytes + SEGMENT_DURATION_BYTES
+        segment_bytes = bytes(audio_buffer[segment_start:segment_end])
+        
+        if len(segment_bytes) < 1600:  # Less than 0.05 seconds
+            return
+        
+        # Calculate time offset for this segment
+        segment_offset = segment_start / BYTES_PER_SECOND
+        
+        print(f"🔄 Processing streaming segment for {sid}: {len(segment_bytes)} bytes (offset: {segment_offset:.2f}s)")
+        
+        # Process the segment
+        segment_transcript = process_audio_segment(segment_bytes, segment_offset)
+        
+        if segment_transcript and segment_transcript.strip():
+            # Accumulate transcript
+            if context_accumulated_transcript.get(sid):
+                context_accumulated_transcript[sid] += "\n" + segment_transcript
+            else:
+                context_accumulated_transcript[sid] = segment_transcript
+            
+            # Update processed bytes (account for overlap)
+            new_processed_bytes = segment_end - OVERLAP_BYTES
+            context_processed_bytes[sid] = new_processed_bytes
+            
+            print(f"✅ Processed segment for {sid}: {len(segment_transcript.splitlines())} lines (total processed: {new_processed_bytes} bytes)")
+            
+            # Store chunks incrementally (when enough text accumulated)
+            # Note: With 50-second segments, we'll store after each segment is processed
+            accumulated_text = context_accumulated_transcript.get(sid, "")
+            if len(accumulated_text) > 100:  # Store when we have text (lower threshold since segments are longer)
+                print(f"📦 Storing accumulated transcript chunks for {sid}...")
+                success = process_and_store_conversation(accumulated_text)
+                if success:
+                    # Clear accumulated transcript after successful storage
+                    context_accumulated_transcript[sid] = ""
+                    print(f"✅ Stored chunks for {sid}, cleared accumulated transcript")
+        else:
+            # Even if no transcript, advance processed bytes to avoid getting stuck
+            context_processed_bytes[sid] = segment_end - OVERLAP_BYTES
+            
+    except Exception as e:
+        print(f"❌ Error processing streaming segment for {sid}: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        lock.release()
+
+
+def process_context_audio_background(audio_filename):
+    """
+    Background task to process remaining context audio after recording completes.
+    Processes any remaining unprocessed audio and finalizes storage.
+    """
+    try:
+        print(f"🔄 Starting final processing for {audio_filename}...")
+        
+        # Step 1: Process audio through transcription and diarization
+        print(f"📝 Step 1/3: Transcribing and diarizing audio...")
+        transcript_text = process_audio_file(audio_filename)
+        
+        if not transcript_text or not transcript_text.strip():
+            print(f"⚠️ No transcript generated from {audio_filename}")
+            return False
+        
+        print(f"✅ Transcription and diarization complete. Generated transcript with {len(transcript_text.splitlines())} lines")
+        
+        # Step 2: Chunk conversation and store in vector database
+        print(f"📦 Step 2/3: Chunking conversation and storing in vector database...")
+        success = process_and_store_conversation(transcript_text)
+        
+        if success:
+            print(f"✅ Step 3/3: Successfully processed and stored context audio from {audio_filename}")
+        else:
+            print(f"❌ Failed to store chunks in vector database for {audio_filename}")
+        
+        return success
+        
+    except Exception as e:
+        print(f"❌ Error processing context audio {audio_filename}: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 
 @socketio.on("context_audio_complete")
 def handle_context_audio_complete():
     """
-    Client indicated context-recording finished. Save WAV for later server-side processing.
+    Client indicated context-recording finished. 
+    Process any remaining unprocessed audio and finalize storage.
     """
     sid = request.sid
     data = partial_context_audio.get(sid, None)
@@ -218,12 +382,45 @@ def handle_context_audio_complete():
     else:
         filename = f"received_{sid}_context.wav"
         try:
+            # Save the complete audio file
             with wave.open(filename, "wb") as wf:
                 wf.setnchannels(1)
                 wf.setsampwidth(2)  # int16
                 wf.setframerate(16000)
                 wf.writeframes(bytes(data))
             print(f"💾 Saved recorded CONTEXT audio as '{filename}', {len(data)} bytes")
+            
+            if PROCESSING_AVAILABLE:
+                # Process any remaining unprocessed audio
+                processed_bytes = context_processed_bytes.get(sid, 0)
+                total_bytes = len(data)
+                remaining_bytes = total_bytes - processed_bytes
+                
+                if remaining_bytes > 1600:  # More than 0.05 seconds remaining
+                    print(f"🔄 Processing remaining {remaining_bytes} bytes for {sid}...")
+                    # Extract and process remaining segment
+                    remaining_segment = bytes(data[processed_bytes:])
+                    segment_offset = processed_bytes / BYTES_PER_SECOND
+                    remaining_transcript = process_audio_segment(remaining_segment, segment_offset)
+                    
+                    if remaining_transcript and remaining_transcript.strip():
+                        # Add to accumulated transcript
+                        if context_accumulated_transcript.get(sid):
+                            context_accumulated_transcript[sid] += "\n" + remaining_transcript
+                        else:
+                            context_accumulated_transcript[sid] = remaining_transcript
+                
+                # Store any remaining accumulated transcript
+                accumulated_transcript = context_accumulated_transcript.get(sid)
+                if accumulated_transcript:
+                    print(f"📦 Storing final accumulated transcript for {sid}...")
+                    process_and_store_conversation(accumulated_transcript)
+                    context_accumulated_transcript[sid] = ""
+                
+                print(f"✅ Completed streaming processing for {sid}")
+            else:
+                print(f"⚠️ Processing modules not available. Audio saved but not processed.")
+                
         except Exception as e:
             print(f"❌ Failed to write CONTEXT WAV for {sid}: {e}")
 
