@@ -2,6 +2,20 @@
 Helper module for processing audio files through diarization and transcription.
 Can be imported and used by server.py for real-time processing.
 """
+import warnings
+# Suppress torchaudio deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torchaudio")
+warnings.filterwarnings("ignore", message=".*torchaudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TorchAudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_fwd.*")
+warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*")
+warnings.filterwarnings("ignore", message=".*FP16 is not supported on CPU.*")
+# Suppress SpeechBrain deprecation warnings
+warnings.filterwarnings("ignore", message=".*speechbrain.pretrained.*deprecated.*")
+# Suppress pyannote warnings about symlinks on Windows
+warnings.filterwarnings("ignore", message=".*Pretrainer collection using symlinks on Windows.*")
+
 import logging
 import torch
 from pathlib import Path

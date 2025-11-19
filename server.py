@@ -1,4 +1,18 @@
 # server.py
+import warnings
+# Suppress torchaudio deprecation warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings("ignore", category=FutureWarning, module="torchaudio")
+warnings.filterwarnings("ignore", message=".*torchaudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*TorchAudio.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.custom_fwd.*")
+warnings.filterwarnings("ignore", message=".*std\\(\\): degrees of freedom.*")
+warnings.filterwarnings("ignore", message=".*FP16 is not supported on CPU.*")
+# Suppress SpeechBrain deprecation warnings
+warnings.filterwarnings("ignore", message=".*speechbrain.pretrained.*deprecated.*")
+# Suppress pyannote warnings about symlinks on Windows
+warnings.filterwarnings("ignore", message=".*Pretrainer collection using symlinks on Windows.*")
+
 from flask import Flask, request
 from flask_socketio import SocketIO, emit
 import wave
@@ -170,7 +184,7 @@ def stream_reply_to_client(sid):
     Honors reply_stream_stop_flags[sid] to stop early when client requests.
     Emits 'server_audio_chunk' events and a final 'server_audio_complete'.
     """
-    print(f"▶️ stream_reply_to_client started for {sid}")
+    print(f"\n▶️ stream_reply_to_client started for {sid}")
     total = len(SAMPLE_REPLY)
     sent = 0
     while sent < total:
@@ -192,7 +206,7 @@ def stream_reply_to_client(sid):
         socketio.emit("server_audio_complete", to=sid)
     except Exception:
         pass
-    print(f"✅ Finished (or stopped) streaming reply to {sid} (sent={sent}/{total})")
+    print(f"\n✅ Finished (or stopped) streaming reply to {sid} (sent={sent}/{total})")
 
 
 @socketio.on("stop_server_stream")
@@ -202,7 +216,7 @@ def on_stop_server_stream():
     """
     sid = request.sid
     reply_stream_stop_flags[sid] = True
-    print(f"📴 Received stop_server_stream from {sid}")
+    print(f"\n📴 Received stop_server_stream from {sid}")
 
 
 # -----------------------------
