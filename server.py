@@ -61,6 +61,10 @@ context_processed_bytes = {}     # sid -> int: bytes already processed
 context_processing_lock = {}     # sid -> threading.Lock: prevent concurrent processing
 context_accumulated_transcript = {}  # sid -> str: accumulated transcript from all segments
 
+# Chunk counters for clean logging
+query_chunk_count = {}           # sid -> int: number of query chunks received
+context_chunk_count = {}         # sid -> int: number of context chunks received
+
 CHUNK_SIZE = 4096
 STREAM_DELAY = 0.04  # seconds between sending chunks (tune for latency vs jitter)
 
@@ -77,6 +81,8 @@ def on_connect():
     context_processed_bytes[sid] = 0
     context_processing_lock[sid] = threading.Lock()
     context_accumulated_transcript[sid] = ""
+    query_chunk_count[sid] = 0
+    context_chunk_count[sid] = 0
 
 
 @socketio.on("disconnect")
@@ -92,6 +98,8 @@ def on_disconnect():
     context_processed_bytes.pop(sid, None)
     context_processing_lock.pop(sid, None)
     context_accumulated_transcript.pop(sid, None)
+    query_chunk_count.pop(sid, None)
+    context_chunk_count.pop(sid, None)
 
 
 # -----------------------------
@@ -113,10 +121,14 @@ def handle_audio_chunk(data):
     if not is_recording[sid]:
         partial_audio[sid] = bytearray()   # clear previous query recording
         is_recording[sid] = True
-        print(f"🆕 (query) Starting new recording for {sid} — cleared previous query buffer")
+        query_chunk_count[sid] = 0
+        print(f"\n🆕 [QueryStream] Starting new recording for {sid}")
 
     partial_audio[sid].extend(data)
-    print(f"🎤 (query) Received chunk from {sid}: {len(data)} bytes (total_query={len(partial_audio[sid])})")
+    query_chunk_count[sid] = query_chunk_count.get(sid, 0) + 1
+    total_bytes = len(partial_audio[sid])
+    total_mb = total_bytes / (1024 * 1024)
+    print(f"\r[QueryStream] {total_mb:.2f} MB received | {query_chunk_count[sid]} chunks processed", end="", flush=True)
 
 
 @socketio.on("audio_complete")
@@ -136,7 +148,8 @@ def handle_audio_complete():
                 wf.setsampwidth(2)  # int16
                 wf.setframerate(16000)
                 wf.writeframes(bytes(data))
-            print(f"💾 Saved recorded QUERY audio as '{filename}', {len(data)} bytes")
+            total_mb = len(data) / (1024 * 1024)
+            print(f"\n💾 [QueryStream] Saved '{filename}' | {total_mb:.2f} MB | {query_chunk_count.get(sid, 0)} chunks")
         except Exception as e:
             print(f"❌ Failed to write QUERY WAV for {sid}: {e}")
 
@@ -202,11 +215,12 @@ def on_context_start():
     Clear any previous context buffer and mark as recording (server will accept context_audio_chunk).
     """
     sid = request.sid
-    print(f"🟣 Received context_start from {sid} -> starting NEW context session (clearing previous buffer)")
+    print(f"\n🟣 [AudioStream] Starting NEW context session for {sid} (clearing previous buffer)")
     partial_context_audio[sid] = bytearray()
     is_context_recording[sid] = True
     context_processed_bytes[sid] = 0
     context_accumulated_transcript[sid] = ""
+    context_chunk_count[sid] = 0
 
 
 @socketio.on("context_resume")
@@ -217,7 +231,7 @@ def on_context_resume():
     """
     sid = request.sid
     is_context_recording[sid] = True
-    print(f"🟣 Received context_resume from {sid} -> resuming context recording (no buffer clear)")
+    print(f"\n🟣 [AudioStream] Resuming context recording for {sid} (no buffer clear)")
 
 
 @socketio.on("context_pause")
@@ -227,7 +241,7 @@ def on_context_pause():
     """
     sid = request.sid
     is_context_recording[sid] = False
-    print(f"🟣 Received context_pause from {sid} -> pausing context recording")
+    print(f"\n🟣 [AudioStream] Pausing context recording for {sid}")
 
 
 @socketio.on("context_audio_chunk")
@@ -240,7 +254,7 @@ def handle_context_audio_chunk(data):
     if sid not in partial_context_audio:
         partial_context_audio[sid] = bytearray()
     if not is_context_recording.get(sid, False):
-        print(f"⚠️ (context) Received chunk for {sid} but server thinks context is paused; ignoring.")
+        print(f"\n⚠️ [AudioStream] Received chunk for {sid} but context is paused; ignoring.")
         return
 
     partial_context_audio[sid].extend(data)
@@ -253,7 +267,10 @@ def handle_context_audio_chunk(data):
         # Process the segment in background (non-blocking)
         socketio.start_background_task(process_context_segment_streaming, sid)
     
-    print(f"🎤 (context) Received chunk from {sid}: {len(data)} bytes (total={total_bytes}, processed={processed_bytes})")
+    context_chunk_count[sid] = context_chunk_count.get(sid, 0) + 1
+    total_mb = total_bytes / (1024 * 1024)
+    processed_mb = processed_bytes / (1024 * 1024)
+    print(f"\r[AudioStream] {total_mb:.2f} MB received | {context_chunk_count[sid]} chunks | {processed_mb:.2f} MB processed", end="", flush=True)
 
 
 def process_context_segment_streaming(sid):
@@ -293,7 +310,8 @@ def process_context_segment_streaming(sid):
         # Calculate time offset for this segment
         segment_offset = segment_start / BYTES_PER_SECOND
         
-        print(f"🔄 Processing streaming segment for {sid}: {len(segment_bytes)} bytes (offset: {segment_offset:.2f}s)")
+        segment_mb = len(segment_bytes) / (1024 * 1024)
+        print(f"\n🔄 [AudioStream] Processing segment: {segment_mb:.2f} MB (offset: {segment_offset:.2f}s)")
         
         # Process the segment
         segment_transcript = process_audio_segment(segment_bytes, segment_offset)
@@ -309,7 +327,8 @@ def process_context_segment_streaming(sid):
             new_processed_bytes = segment_end - OVERLAP_BYTES
             context_processed_bytes[sid] = new_processed_bytes
             
-            print(f"✅ Processed segment for {sid}: {len(segment_transcript.splitlines())} lines (total processed: {new_processed_bytes} bytes)")
+            processed_mb = new_processed_bytes / (1024 * 1024)
+            print(f"✅ [AudioStream] Processed segment: {len(segment_transcript.splitlines())} lines | {processed_mb:.2f} MB processed")
             
             # Store chunks incrementally (when enough text accumulated)
             # Note: With 50-second segments, we'll store after each segment is processed
@@ -388,7 +407,8 @@ def handle_context_audio_complete():
                 wf.setsampwidth(2)  # int16
                 wf.setframerate(16000)
                 wf.writeframes(bytes(data))
-            print(f"💾 Saved recorded CONTEXT audio as '{filename}', {len(data)} bytes")
+            total_mb = len(data) / (1024 * 1024)
+            print(f"\n💾 [AudioStream] Saved '{filename}' | {total_mb:.2f} MB | {context_chunk_count.get(sid, 0)} chunks")
             
             if PROCESSING_AVAILABLE:
                 # Process any remaining unprocessed audio
@@ -417,7 +437,7 @@ def handle_context_audio_complete():
                     process_and_store_conversation(accumulated_transcript)
                     context_accumulated_transcript[sid] = ""
                 
-                print(f"✅ Completed streaming processing for {sid}")
+                print(f"✅ [AudioStream] Completed streaming processing for {sid}")
             else:
                 print(f"⚠️ Processing modules not available. Audio saved but not processed.")
                 
