@@ -77,7 +77,10 @@ context_accumulated_transcript = {}  # sid -> str: accumulated transcript from a
 
 # Chunk counters for clean logging
 query_chunk_count = {}           # sid -> int: number of query chunks received
+# Chunk counters for clean logging
+query_chunk_count = {}           # sid -> int: number of query chunks received
 context_chunk_count = {}         # sid -> int: number of context chunks received
+finalizing_processing = {}       # sid -> bool: flag to indicate completion handler is running
 
 CHUNK_SIZE = 4096
 STREAM_DELAY = 0.04  # seconds between sending chunks (tune for latency vs jitter)
@@ -102,7 +105,25 @@ def on_connect():
 @socketio.on("disconnect")
 def on_disconnect():
     sid = request.sid
-    print(f"❌ Client disconnected: {sid}")
+    # Clean up client state
+    if finalizing_processing.get(sid):
+        print(f"⏳ Deferring cleanup for {sid} to handle_context_audio_complete")
+        return
+
+    # If processing is active, we try to acquire lock to ensure we don't delete state 
+    # while handle_context_audio_complete is using it.
+    lock = context_processing_lock.get(sid)
+    if lock:
+        # Try to acquire lock (blocking) to wait for any active processing to finish
+        with lock:
+            _perform_cleanup(sid)
+    else:
+        _perform_cleanup(sid)
+
+
+def _perform_cleanup(sid):
+    """Helper to clean up client state."""
+    print(f"🧹 Cleaning up state for {sid}")
     partial_audio.pop(sid, None)
     partial_context_audio.pop(sid, None)
     is_recording.pop(sid, None)
@@ -114,6 +135,7 @@ def on_disconnect():
     context_accumulated_transcript.pop(sid, None)
     query_chunk_count.pop(sid, None)
     context_chunk_count.pop(sid, None)
+    finalizing_processing.pop(sid, None)
 
 
 # -----------------------------
@@ -409,26 +431,49 @@ def handle_context_audio_complete():
     Process any remaining unprocessed audio and finalize storage.
     """
     sid = request.sid
-    data = partial_context_audio.get(sid, None)
-    if not data:
-        print(f"⚠️ context_audio_complete received but no context data for {sid}")
-    else:
-        filename = f"received_{sid}_context.wav"
-        try:
-            # Save the complete audio file
-            with wave.open(filename, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)  # int16
-                wf.setframerate(16000)
-                wf.writeframes(bytes(data))
-            total_mb = len(data) / (1024 * 1024)
-            print(f"\n💾 [AudioStream] Saved '{filename}' | {total_mb:.2f} MB | {context_chunk_count.get(sid, 0)} chunks")
+    # Mark context recording finished so next context_start will clear buffer
+    is_context_recording[sid] = False
+    finalizing_processing[sid] = True
+    
+    print(f"🏁 handle_context_audio_complete called for {sid}")
+    
+    try:
+        # Acquire lock EARLY to prevent on_disconnect from cleaning up state while we work
+        lock = context_processing_lock.get(sid)
+        if not lock:
+            print(f"⚠️ Lock not found for {sid} in handle_context_audio_complete (already disconnected?)")
+            return
+
+        print(f"🔒 Attempting to acquire lock for {sid}...")
+        with lock:
+            print(f"🔒 Lock acquired for {sid}")
             
+            data = partial_context_audio.get(sid, None)
+            if not data:
+                print(f"⚠️ context_audio_complete received but no context data for {sid}")
+                return
+
+            filename = f"received_{sid}_context.wav"
+            try:
+                # Save the complete audio file
+                with wave.open(filename, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)  # int16
+                    wf.setframerate(16000)
+                    wf.writeframes(bytes(data))
+                total_mb = len(data) / (1024 * 1024)
+                print(f"\n💾 [AudioStream] Saved '{filename}' | {total_mb:.2f} MB | {context_chunk_count.get(sid, 0)} chunks")
+                
+            except Exception as e:
+                print(f"❌ Failed to write CONTEXT WAV for {sid}: {e}")
+                # Continue processing even if save fails? Yes.
+
             if PROCESSING_AVAILABLE:
                 # Process any remaining unprocessed audio
                 processed_bytes = context_processed_bytes.get(sid, 0)
                 total_bytes = len(data)
                 remaining_bytes = total_bytes - processed_bytes
+                print(f"📊 Stats: Total={total_bytes}, Processed={processed_bytes}, Remaining={remaining_bytes}")
                 
                 if remaining_bytes > 1600:  # More than 0.05 seconds remaining
                     print(f"🔄 Processing remaining {remaining_bytes} bytes for {sid}...")
@@ -437,12 +482,18 @@ def handle_context_audio_complete():
                     segment_offset = processed_bytes / BYTES_PER_SECOND
                     remaining_transcript = process_audio_segment(remaining_segment, segment_offset)
                     
+                    print(f"📄 Remaining transcript length: {len(remaining_transcript) if remaining_transcript else 0}")
+                    if remaining_transcript:
+                        print(f"📄 Transcript start: {remaining_transcript[:50]}...")
+
                     if remaining_transcript and remaining_transcript.strip():
                         # Add to accumulated transcript
                         if context_accumulated_transcript.get(sid):
                             context_accumulated_transcript[sid] += "\n" + remaining_transcript
                         else:
                             context_accumulated_transcript[sid] = remaining_transcript
+                else:
+                    print(f"⚠️ Remaining bytes {remaining_bytes} too small to process")
                 
                 # Store any remaining accumulated transcript
                 accumulated_transcript = context_accumulated_transcript.get(sid)
@@ -454,12 +505,10 @@ def handle_context_audio_complete():
                 print(f"✅ [AudioStream] Completed streaming processing for {sid}")
             else:
                 print(f"⚠️ Processing modules not available. Audio saved but not processed.")
-                
-        except Exception as e:
-            print(f"❌ Failed to write CONTEXT WAV for {sid}: {e}")
-
-    # Mark context recording finished so next context_start will clear buffer
-    is_context_recording[sid] = False
+    
+    finally:
+        # Ensure cleanup happens if we took ownership
+        _perform_cleanup(sid)
 
 
 if __name__ == "__main__":
