@@ -1,13 +1,15 @@
 import logging
 import torch
+import torchaudio
+import uuid
+from datetime import datetime
 from speechbrain.inference.speaker import SpeakerRecognition
 from config import (
     MEETING_AUDIO_FILE, OUTPUT_DIR, SPEECHBRAIN_MODEL, DEVICE,
     SIMILARITY_THRESHOLD, MARGIN
 )
 from utils import load_and_resample
-from pinecone_utils import get_pinecone_index
-from pinecone_utils import find_matching_speaker
+from pinecone_utils import get_pinecone_index, find_matching_speaker, upsert_embeddings
 from diarizer import load_diarizer, diarize_audio
 from transcriber import load_whisper_model, transcribe_audio
 from itertools import groupby
@@ -15,6 +17,8 @@ from itertools import groupby
 # Ensure output directory exists
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_FILE = OUTPUT_DIR / "named_diarized_output.txt"
+UNKNOWN_VOICES_DIR = OUTPUT_DIR.parent / "unknown_voices"
+UNKNOWN_VOICES_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -77,7 +81,23 @@ def main():
 
             # Assign unknown speaker if confidence low
             if not identified_speaker:
-                identified_speaker = f"Unknown_{speaker_label}"
+                # Generate unique name
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                unique_id = str(uuid.uuid4())[:6]
+                identified_speaker = f"Spk_{timestamp}_{unique_id}"
+                
+                # Save audio segment (non-blocking failure)
+                try:
+                    audio_filename = UNKNOWN_VOICES_DIR / f"{identified_speaker}.wav"
+                    torchaudio.save(str(audio_filename), segment_waveform.cpu(), sample_rate)
+                except Exception as e:
+                    logging.error(f"❌ Failed to save audio for {identified_speaker}: {e}")
+                
+                # Upsert embedding to Pinecone
+                vector = segment_embedding.cpu().numpy().tolist()
+                upsert_embeddings(index, [{'id': identified_speaker, 'values': vector}])
+                
+                logging.info(f"⬆️✨Enrolled new speaker: {identified_speaker}")
 
             speaker_map[speaker_label] = identified_speaker
 

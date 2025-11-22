@@ -9,6 +9,7 @@ load_dotenv()
 PROJECT_DIR = Path(__file__).parent.resolve()
 REFERENCE_VOICES_DIR = PROJECT_DIR / "reference_voices"   # Reference speaker .wav files folder
 OUTPUT_DIR = PROJECT_DIR / "output"                      # Output folder for transcripts
+UNKNOWN_VOICES_DIR = PROJECT_DIR / "unknown_voices"      # Folder for unknown speaker audio segments
 MEETING_AUDIO_FILE = PROJECT_DIR / "zapp_3_5_20.wav"   # Audio file to diarize and transcribe (update accordingly)
 # MEETING_AUDIO_FILE = PROJECT_DIR / "videoplayback (1) (mp3cut.net).wav"   # Audio file to diarize and transcribe (update accordingly)
 # MEETING_AUDIO_FILE = PROJECT_DIR / "videoplayback (1).wav"   # Audio file to diarize and transcribe (update accordingly)

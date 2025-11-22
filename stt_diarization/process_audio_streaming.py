@@ -17,66 +17,22 @@ warnings.filterwarnings("ignore", message=".*speechbrain.pretrained.*deprecated.
 warnings.filterwarnings("ignore", message=".*Pretrainer collection using symlinks on Windows.*")
 
 import logging
-import torch
 import wave
 import tempfile
 from pathlib import Path
-from speechbrain.inference.speaker import SpeakerRecognition
-from config import (
-    OUTPUT_DIR, SPEECHBRAIN_MODEL, DEVICE,
-    SIMILARITY_THRESHOLD, MARGIN
-)
+from config import OUTPUT_DIR, SIMILARITY_THRESHOLD, MARGIN
 from utils import load_and_resample
-from pinecone_utils import get_pinecone_index, find_matching_speaker
-from diarizer import load_diarizer, diarize_audio
-from transcriber import load_whisper_model, transcribe_audio
+from diarizer import diarize_audio
+from transcriber import transcribe_audio
 from itertools import groupby
+from core_processing import (
+    get_models, check_local_cache, identify_speaker, enroll_unknown_speaker
+)
 
 # Ensure output directory exists
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Global model instances (loaded once, reused)
-_speaker_id_model = None
-_diarization_pipeline = None
-_whisper_model = None
-_pinecone_index = None
-
-def get_models():
-    """Load and cache models (singleton pattern for efficiency)."""
-    global _speaker_id_model, _diarization_pipeline, _whisper_model, _pinecone_index
-    
-    if _speaker_id_model is None:
-        logging.info("Loading speaker recognition model...")
-        project_dir = Path(__file__).parent
-        pretrained_dir = project_dir / "pretrained_models" / SPEECHBRAIN_MODEL.replace('/', '_')
-        _speaker_id_model = SpeakerRecognition.from_hparams(
-            source=SPEECHBRAIN_MODEL,
-            savedir=str(pretrained_dir),
-            run_opts={"device": DEVICE}
-        )
-    
-    if _diarization_pipeline is None:
-        logging.info("Loading diarization pipeline...")
-        _diarization_pipeline = load_diarizer()
-    
-    if _whisper_model is None:
-        logging.info("Loading Whisper model...")
-        _whisper_model = load_whisper_model()
-    
-    if _pinecone_index is None:
-        logging.info("Loading Pinecone index...")
-        _pinecone_index = get_pinecone_index()
-        stats = _pinecone_index.describe_index_stats()
-        if stats['namespaces'].get("reference", {}).get("vector_count", 0) == 0:
-            logging.warning("No speaker embeddings enrolled in Pinecone 'reference' namespace.")
-    
-    return _speaker_id_model, _diarization_pipeline, _whisper_model, _pinecone_index
-
-def identify_speaker(embedding_tensor, index, threshold=0.6):
-    """Identify speaker by querying Pinecone with embedding vector."""
-    return find_matching_speaker(index, embedding_tensor, threshold=threshold)
 
 def save_audio_segment(audio_bytes, output_path):
     """Save audio bytes to a WAV file."""
@@ -138,14 +94,21 @@ def process_audio_segment(audio_bytes, segment_offset=0.0):
                 end_sample = int(segment.end * sample_rate)
                 segment_waveform = meeting_waveform[:, start_sample:end_sample]
                 
-                if segment_waveform.shape[1] < 1600:
+                min_length = int(1.0 * sample_rate)  # 1 second in samples
+                if segment_waveform.shape[1] < min_length:
                     continue
-                
+
                 segment_embedding = speaker_id_model.encode_batch(segment_waveform).squeeze()
-                identified_speaker, score = identify_speaker(segment_embedding, index, SIMILARITY_THRESHOLD)
+                
+                # 1. Check local cache first
+                identified_speaker, score = check_local_cache(segment_embedding, SIMILARITY_THRESHOLD)
+                
+                # 2. If not in cache, query Pinecone
+                if not identified_speaker:
+                    identified_speaker, score = identify_speaker(segment_embedding, index, SIMILARITY_THRESHOLD)
                 
                 if not identified_speaker:
-                    identified_speaker = f"Unknown_{speaker_label}"
+                    identified_speaker = enroll_unknown_speaker(segment_waveform, segment_embedding, sample_rate, index)
                 
                 speaker_map[speaker_label] = identified_speaker
             
@@ -201,4 +164,3 @@ def process_audio_segment(audio_bytes, segment_offset=0.0):
             Path(tmp_path).unlink()
         except:
             pass
-
