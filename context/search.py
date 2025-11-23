@@ -17,9 +17,12 @@ co = cohere.Client(COHERE_API_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index(PINECONE_INDEX)
 
-def get_query_and_memories():
+def get_query_and_memories(query_text=None):
     # Search query
-    query = input("Ask AISmriti your question: ")
+    if query_text:
+        query = query_text
+    else:
+        query = input("Ask AISmriti your question: ")
     # query = "What did I eat with my friend?"
     # query = "What English Vocabulary is good?"
     # query = "What did the user say about the medicine and doctor?"

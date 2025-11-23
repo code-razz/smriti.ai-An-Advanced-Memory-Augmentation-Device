@@ -64,3 +64,4 @@ regex>=2023.0.0
 # Optional: CUDA support (uncomment if using GPU)
 # torch-audio>=2.0.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
 # torch>=2.0.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+edge-tts>=6.1.9
