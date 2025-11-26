@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 import cohere
 from pinecone import Pinecone, ServerlessSpec
 import re
+from db_utils import save_chunk_to_mongodb
 
 # Load environment variables
 load_dotenv()
@@ -280,6 +281,19 @@ def store_chunks_in_vector_db(conversation_chunks: List[Dict]) -> bool:
         )
         
         print(f"✅ Successfully embedded and upserted {len(vectors)} chunks into Pinecone (namespace: '{NAMESPACE}')")
+        
+        # Save to MongoDB
+        print("💾 Saving chunks to MongoDB...")
+        for vec in vectors:
+            # Reconstruct chunk object for MongoDB
+            # Exact duplicate of Pinecone structure: id, values, metadata
+            mongo_chunk = {
+                "id": vec["id"],
+                "values": vec["values"],
+                "metadata": vec["metadata"]
+            }
+            save_chunk_to_mongodb(mongo_chunk)
+        print(f"✅ Saved {len(vectors)} chunks to MongoDB")
         
         # Log upserted records to file with timestamp
         timestamp = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d %H:%M:%S %Z")

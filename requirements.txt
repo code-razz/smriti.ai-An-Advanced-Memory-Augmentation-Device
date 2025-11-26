@@ -65,3 +65,4 @@ regex>=2023.0.0
 # torch-audio>=2.0.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
 # torch>=2.0.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
 edge-tts>=6.1.9
+pymongo>=4.6.0
