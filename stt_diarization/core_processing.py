@@ -12,6 +12,7 @@ from config import (
 from pinecone_utils import get_pinecone_index, find_matching_speaker, upsert_embeddings
 from diarizer import load_diarizer
 from transcriber import load_whisper_model
+from cloudinary_utils import upload_audio_to_cloudinary
 
 # Ensure directories exist
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -93,15 +94,21 @@ def enroll_unknown_speaker(segment_waveform, segment_embedding, sample_rate, ind
     identified_speaker = f"Spk_{timestamp}_{unique_id}"
     
     # Save audio segment (non-blocking failure)
+    audio_url = None
     try:
         audio_filename = UNKNOWN_VOICES_DIR / f"{identified_speaker}.wav"
         torchaudio.save(str(audio_filename), segment_waveform.cpu(), sample_rate)
+        
+        # Upload to Cloudinary
+        audio_url = upload_audio_to_cloudinary(audio_filename, identified_speaker)
+        
     except Exception as e:
-        logging.error(f"❌ Failed to save audio for {identified_speaker}: {e}")
+        logging.error(f"❌ Failed to save/upload audio for {identified_speaker}: {e}")
     
     # Upsert embedding to Pinecone
     vector = segment_embedding.cpu().numpy().tolist()
-    upsert_embeddings(index, [{'id': identified_speaker, 'values': vector}])
+    metadata = {'audio_url': audio_url} if audio_url else {}
+    upsert_embeddings(index, [{'id': identified_speaker, 'values': vector, 'metadata': metadata}])
     
     # Add to local cache
     _local_speaker_cache[identified_speaker] = segment_embedding

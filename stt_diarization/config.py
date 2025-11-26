@@ -34,4 +34,10 @@ SIMILARITY_THRESHOLD = 0.60
 MARGIN = 0.25
 
 # Select device based on CUDA availability or environment variables
+# Select device based on CUDA availability or environment variables
 DEVICE = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") or os.getenv("CUDA_DEVICE") else "cpu"
+
+# Cloudinary Credentials
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")

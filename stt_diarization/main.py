@@ -10,6 +10,7 @@ from config import (
 )
 from utils import load_and_resample
 from pinecone_utils import get_pinecone_index, find_matching_speaker, upsert_embeddings
+from core_processing import enroll_unknown_speaker
 from diarizer import load_diarizer, diarize_audio
 from transcriber import load_whisper_model, transcribe_audio
 from itertools import groupby
@@ -81,23 +82,7 @@ def main():
 
             # Assign unknown speaker if confidence low
             if not identified_speaker:
-                # Generate unique name
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                unique_id = str(uuid.uuid4())[:6]
-                identified_speaker = f"Spk_{timestamp}_{unique_id}"
-                
-                # Save audio segment (non-blocking failure)
-                try:
-                    audio_filename = UNKNOWN_VOICES_DIR / f"{identified_speaker}.wav"
-                    torchaudio.save(str(audio_filename), segment_waveform.cpu(), sample_rate)
-                except Exception as e:
-                    logging.error(f"❌ Failed to save audio for {identified_speaker}: {e}")
-                
-                # Upsert embedding to Pinecone
-                vector = segment_embedding.cpu().numpy().tolist()
-                upsert_embeddings(index, [{'id': identified_speaker, 'values': vector}])
-                
-                logging.info(f"⬆️✨Enrolled new speaker: {identified_speaker}")
+                identified_speaker = enroll_unknown_speaker(segment_waveform, segment_embedding, sample_rate, index)
 
             speaker_map[speaker_label] = identified_speaker
 
