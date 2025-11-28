@@ -36,3 +36,43 @@ def upload_audio_to_cloudinary(file_path, public_id):
     except Exception as e:
         logging.error(f"❌ Cloudinary upload failed: {e}")
         return None
+
+def upload_face_image(image_bytes: bytes, person_name: str) -> dict:
+    """
+    Uploads a face image (JPEG bytes) to Cloudinary.
+    - image_bytes: cropped face (JPEG bytes)
+    - person_name: label/name
+
+    Returns:
+      {
+        "public_id": "...",
+        "url": "http://...",
+        "secure_url": "https://..."
+      }
+    """
+    import time
+    timestamp = int(time.time())
+    # e.g. smriti/faces/Atia_1733691234
+    public_id_base = f"smriti/faces/{person_name}_{timestamp}"
+
+    try:
+        logging.info(f"☁️ Uploading face for {person_name} to Cloudinary...")
+        result = cloudinary.uploader.upload(
+            image_bytes,
+            public_id=public_id_base,
+            folder="smriti/faces",
+            resource_type="image",
+            tags=["ai-smriti", f"person:{person_name}"],
+            context={"name": person_name},
+            overwrite=False,
+        )
+        
+        logging.info(f"✅ Cloudinary face upload successful: {result.get('secure_url')}")
+        return {
+            "public_id": result.get("public_id"),
+            "url": result.get("url"),
+            "secure_url": result.get("secure_url"),
+        }
+    except Exception as e:
+        logging.error(f"❌ Cloudinary face upload failed: {e}")
+        return {}

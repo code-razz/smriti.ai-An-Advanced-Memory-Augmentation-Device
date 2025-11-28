@@ -13,7 +13,8 @@ warnings.filterwarnings("ignore", message=".*speechbrain.pretrained.*deprecated.
 # Suppress pyannote warnings about symlinks on Windows
 warnings.filterwarnings("ignore", message=".*Pretrainer collection using symlinks on Windows.*")
 
-from flask import Flask, request
+# from flask import Flask, request
+from flask import Flask, request, jsonify, current_app
 from flask_socketio import SocketIO, emit
 import wave
 import threading
@@ -21,6 +22,11 @@ import time
 import sys
 import os
 from pathlib import Path
+
+import logging
+from typing import Optional, Tuple
+
+from PIL import Image
 
 # Add paths for importing processing modules
 project_root = Path(__file__).parent
@@ -681,6 +687,159 @@ def handle_context_audio_complete():
         # Ensure cleanup happens if we took ownership
         _perform_cleanup(sid)
 
+
+# -----------------------------
+# Face Recognition Endpoint
+# -----------------------------
+# Add camera_system to path
+sys.path.append(str(project_root / "camera_system"))
+
+# Example config defaults you can override in app.config
+app.config.setdefault("MAX_CONTENT_LENGTH", 5 * 1024 * 1024)  # 5 MB max upload
+app.config.setdefault("ALLOWED_MIMETYPES", {"image/jpeg", "image/png"})
+app.config.setdefault("FACE_CROP_MARGIN", 0.12)  # fraction to expand crop (12%)
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+# Try to import face recognition related modules; mark availability
+try:
+    import face_recognition  # face_recognition package
+    from cloudinary_utils import upload_face_image
+    from face_server_utils import search_face, enroll_face
+    FACE_RECOGNITION_AVAILABLE = True
+except Exception as e:
+    logger.warning("Face recognition modules not available: %s", e)
+    FACE_RECOGNITION_AVAILABLE = False
+
+
+def allowed_file_mimetype(mimetype: Optional[str]) -> bool:
+    if not mimetype:
+        return False
+    return mimetype.lower() in current_app.config["ALLOWED_MIMETYPES"]
+
+
+def expand_box(
+    top: int, right: int, bottom: int, left: int, img_h: int, img_w: int, margin_frac: float
+) -> Tuple[int, int, int, int]:
+    """Expand box by fraction of width/height while staying inside image bounds."""
+    h = bottom - top
+    w = right - left
+    top_new = max(0, int(top - margin_frac * h))
+    bottom_new = min(img_h, int(bottom + margin_frac * h))
+    left_new = max(0, int(left - margin_frac * w))
+    right_new = min(img_w, int(right + margin_frac * w))
+    return top_new, right_new, bottom_new, left_new
+
+
+@app.route("/process_face", methods=["POST"])
+def process_face():
+    """
+    POST multipart/form-data:
+      - image: file
+      - name: optional -> if present, we ENROLL, else we RECOGNIZE
+
+    JSON response:
+      - status: "recognized" | "unknown" | "enrolled" | "error"
+      - name: if recognized/enrolled
+      - image_url: if enrolled or matched
+      - message: debug/info
+    """
+    if not FACE_RECOGNITION_AVAILABLE:
+        return jsonify({"status": "error", "message": "Face recognition backend not loaded."}), 500
+
+    # file presence
+    if "image" not in request.files:
+        return jsonify({"status": "error", "message": "No image file provided."}), 400
+
+    file = request.files["image"]
+    name = request.form.get("name")  # optional: triggers enrollment
+
+    # Basic file validation
+    if not allowed_file_mimetype(file.mimetype):
+        return jsonify({"status": "error", "message": f"Unsupported image type: {file.mimetype}"}), 415
+
+    try:
+        # Ensure the file stream is at start (face_recognition.load_image_file reads file-like)
+        file.stream.seek(0)
+
+        # Load image into numpy array (face_recognition accepts file-like)
+        pil = Image.open(file.stream).convert("RGB")
+        image_np = np.array(pil)  # shape (H, W, 3)
+        img_h, img_w = image_np.shape[:2]
+
+        # Detect faces (HOG faster; use model="cnn" if you have GPU and need accuracy)
+        face_locations = face_recognition.face_locations(image_np, model="hog")
+
+        if not face_locations:
+            return jsonify({"status": "error", "message": "No face detected in image."}), 400
+
+        # If multiple faces, choose the largest face (most likely intended subject)
+        def area(loc):
+            t, r, b, l = loc
+            return (b - t) * (r - l)
+
+        chosen_index = max(range(len(face_locations)), key=lambda i: area(face_locations[i]))
+        chosen_location = face_locations[chosen_index]
+
+        # Generate embedding for the chosen face only
+        face_encodings = face_recognition.face_encodings(image_np, [chosen_location], num_jitters=10)
+        if not face_encodings:
+            return jsonify({"status": "error", "message": "Could not generate embedding."}), 400
+
+        embedding = face_encodings[0].tolist()  # convert to Python list for storage
+
+        # Enrollment flow
+        if name:
+            logger.info("Enrolling new face: %s", name)
+
+            # Crop and expand a bit
+            top, right, bottom, left = chosen_location
+            top, right, bottom, left = expand_box(
+                top, right, bottom, left, img_h, img_w, current_app.config["FACE_CROP_MARGIN"]
+            )
+            face_np = image_np[top:bottom, left:right]
+
+            # Convert to JPEG bytes
+            pil_face = Image.fromarray(face_np)
+            img_io = io.BytesIO()
+            pil_face.save(img_io, format="JPEG", quality=95)
+            img_io.seek(0)
+            image_bytes = img_io.getvalue()
+
+            # Upload to Cloudinary (your helper should return a dict with secure_url)
+            upload_result = upload_face_image(image_bytes, name)
+            image_url = upload_result.get("secure_url") or upload_result.get("url")
+            if not image_url:
+                logger.exception("Cloudinary upload failed: %s", upload_result)
+                return jsonify({"status": "error", "message": "Failed to upload image to storage."}), 500
+
+            # Enroll in vector DB (Pinecone / whatever) via helper
+            success = enroll_face(name, embedding, image_url)
+            if success:
+                return jsonify({"status": "enrolled", "name": name, "image_url": image_url}), 201
+            else:
+                logger.exception("Failed to save enrollment to vector DB for %s", name)
+                return jsonify({"status": "error", "message": "Failed to save to vector DB."}), 500
+
+        # Recognition flow
+        else:
+            logger.info("Recognizing face...")
+            match_metadata = search_face(embedding)
+            if match_metadata:
+                return jsonify(
+                    {
+                        "status": "recognized",
+                        "name": match_metadata.get("name"),
+                        "image_url": match_metadata.get("image_url"),
+                    }
+                )
+            else:
+                return jsonify({"status": "unknown", "message": "No match found."}), 200
+
+    except Exception as exc:
+        logger.exception("Error in /process_face: %s", exc)
+        return jsonify({"status": "error", "message": str(exc)}), 500
 
 if __name__ == "__main__":
     print("🚀 Starting server on 0.0.0.0:5000")
