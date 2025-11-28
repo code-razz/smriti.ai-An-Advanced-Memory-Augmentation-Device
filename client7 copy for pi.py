@@ -11,10 +11,18 @@ import sys
 from gpiozero import Button
 from gpiozero.pins.pigpio import PiGPIOFactory
 
+import requests
+import cv2
+import os
+from io import BytesIO
+from PIL import Image
+from picamera2 import Picamera2
+
 # -----------------------------
 # Config
 # -----------------------------
 SERVER_URL = "http://192.168.31.16:5000"  # change to your server IP
+PROCESS_FACE_ENDPOINT = f"{SERVER_URL}/process_face"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 BLOCKSIZE = 1024  # frames per callback
@@ -263,26 +271,145 @@ def stop_context_recording():
 
 
 # -----------------------------
+# Face Recognition Functions
+# -----------------------------
+def get_face_image_bytes():
+    """
+    Captures an image from the camera using picamera2.
+    Captures 5 frames (Smart Burst) and selects the sharpest one using Laplacian variance.
+    """
+    print("📷 Opening camera...")
+    picam2 = Picamera2()
+    
+    try:
+        # Configure camera for still capture at 640x480
+        config = picam2.create_still_configuration(main={"size": (640, 480)})
+        picam2.configure(config)
+        picam2.start()
+        
+        print(f"   - Camera initialized at: 640x480")
+        print("   - Warming up (2s)...")
+        time.sleep(2.0)
+
+        captured_bytes = None
+        best_frame = None
+        best_score = -1.0
+        
+        # Capture 5 frames in quick succession
+        for i in range(5):
+            try:
+                # Capture frame as numpy array (RGB format)
+                burst_frame = picam2.capture_array()
+                
+                # Convert RGB to BGR for cv2 compatibility
+                burst_frame_bgr = cv2.cvtColor(burst_frame, cv2.COLOR_RGB2BGR)
+                
+                # Calculate sharpness using Laplacian Variance
+                gray = cv2.cvtColor(burst_frame_bgr, cv2.COLOR_BGR2GRAY)
+                score = cv2.Laplacian(gray, cv2.CV_64F).var()
+                
+                if score > best_score:
+                    best_score = score
+                    best_frame = burst_frame_bgr
+                
+                time.sleep(0.05)
+                
+            except Exception as e:
+                print(f"   ⚠️ Error capturing frame {i+1}: {e}")
+                continue
+        
+        if best_frame is not None:
+            print(f"✨ Selected best frame (Score: {best_score:.2f})")
+            # Convert to JPEG bytes
+            is_success, buffer = cv2.imencode(".jpg", best_frame)
+            if is_success:
+                captured_bytes = buffer.tobytes()
+            else:
+                print("❌ Failed to encode image.")
+        else:
+            print("❌ Failed to capture any valid frames.")
+                
+    except Exception as e:
+        print(f"❌ Camera error: {e}")
+        captured_bytes = None
+    finally:
+        try:
+            picam2.stop()
+            picam2.close()
+        except:
+            pass
+    
+    return captured_bytes
+
+def perform_face_recognition():
+    """
+    Captures face and sends to server for recognition.
+    """
+    print("🤖 Starting Face Recognition...")
+    image_bytes = get_face_image_bytes()
+    
+    if not image_bytes:
+        print("❌ No image captured.")
+        return
+
+    print("🚀 Sending to server for recognition...")
+    try:
+        files = {'image': ('face.jpg', image_bytes, 'image/jpeg')}
+        response = requests.post(PROCESS_FACE_ENDPOINT, files=files)
+        
+        if response.status_code != 200:
+            print(f"❌ Server Error: {response.text}")
+            return
+            
+        result = response.json()
+        status = result.get("status")
+        
+        if status == "recognized":
+            name = result.get("name")
+            print(f"\n✨ RECOGNIZED: {name} ✨")
+            # Optional: You could trigger a TTS greeting here via socketio if desired
+            # sio.emit("tts_speak", f"Hello {name}") 
+            
+        elif status == "unknown":
+            print("\n❓ Face Unknown.")
+            # Auto-enrollment logic could go here, or just notify user
+            
+        elif status == "error":
+            print(f"❌ Error: {result.get('message')}")
+            
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+
+# -----------------------------
 # GPIO: configure both buttons
 # -----------------------------
 def setup_buttons():
     """
     Configure two gpiozero Buttons with pigpio backend.
-    - Button1: press-and-hold behaviour for query (when_pressed -> start_query_recording, when_released -> stop_query_recording)
+    - Button1: press-and-hold behaviour for query (when_held -> start_query_recording, when_released -> stop_query_recording)
+      AND single-press for face recognition (when_released without hold).
     - Button2: single-press toggle for context: when_pressed -> toggle context on/off
     """
     factory = PiGPIOFactory()
-    btn1 = Button(BUTTON1_PIN, pin_factory=factory, pull_up=True, bounce_time=BOUNCE_TIME)
+    # Button1: hold_time=0.5s to distinguish click vs hold
+    btn1 = Button(BUTTON1_PIN, pin_factory=factory, pull_up=True, bounce_time=BOUNCE_TIME, hold_time=0.5)
     btn2 = Button(BUTTON2_PIN, pin_factory=factory, pull_up=True, bounce_time=BOUNCE_TIME)
 
-    # Button1 press-and-hold (query)
-    def on_btn1_press():
+    # Button1 Logic
+    def on_btn1_hold():
+        # Triggered after hold_time
         threading.Thread(target=start_query_recording, daemon=True).start()
 
     def on_btn1_release():
-        threading.Thread(target=stop_query_recording, daemon=True).start()
+        # If we were recording query, stop it.
+        # If we were NOT recording query, it means it was a short press -> Face Rec
+        if recording_query:
+            threading.Thread(target=stop_query_recording, daemon=True).start()
+        else:
+            # Short press
+            threading.Thread(target=perform_face_recognition, daemon=True).start()
 
-    btn1.when_pressed = on_btn1_press
+    btn1.when_held = on_btn1_hold
     btn1.when_released = on_btn1_release
 
     # Button2 single-press toggle (context)
@@ -299,7 +426,7 @@ def setup_buttons():
 
     btn2.when_pressed = on_btn2_press
 
-    print(f"🔘 Button1 (query) on BCM pin {BUTTON1_PIN} configured (press & hold).")
+    print(f"🔘 Button1 (query) on BCM pin {BUTTON1_PIN} configured (press & hold / click).")
     print(f"🔘 Button2 (context) on BCM pin {BUTTON2_PIN} configured (single press toggles).")
     return btn1, btn2
 
