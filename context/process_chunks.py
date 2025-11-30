@@ -14,7 +14,8 @@ from dotenv import load_dotenv
 import cohere
 from pinecone import Pinecone, ServerlessSpec
 import re
-from db_utils import save_chunk_to_mongodb
+from db_utils import save_chunk_to_mongodb, save_alert_to_mongodb
+from alert_processing import extract_alerts_from_text
 
 # Load environment variables
 load_dotenv()
@@ -326,5 +327,18 @@ def process_and_store_conversation(conversation_text: str) -> bool:
     
     print(f"✅ Generated {len(chunks)} chunks")
     
-    return store_chunks_in_vector_db(chunks)
+    # Store chunks first
+    success = store_chunks_in_vector_db(chunks)
+    
+    # Extract and save alerts
+    if success:
+        print("🔔 Checking for alerts in conversation...")
+        alerts = extract_alerts_from_text(conversation_text)
+        for alert in alerts:
+            # Add conversation ID context if available
+            if chunks:
+                alert["conversation_id"] = chunks[0]["metadata"].get("conversation_id")
+            save_alert_to_mongodb(alert)
+            
+    return success
 

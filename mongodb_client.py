@@ -13,12 +13,14 @@ MONGO_URL = os.getenv("MONGO_URL")
 client = None
 db = None
 chunks_collection = None
+alerts_collection = None
 
 if MONGO_URL:
     try:
         client = MongoClient(MONGO_URL)
         db = client["smriti-ai"]  # database name
         chunks_collection = db["conversation_chunks"]  # collection
+        alerts_collection = db["alerts"] # alerts collection
         print("[MongoDB] Client initialized.")
     except Exception as e:
         print(f"[MongoDB] Error initializing client: {e}")
