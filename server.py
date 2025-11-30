@@ -28,6 +28,16 @@ from typing import Optional, Tuple
 
 from PIL import Image
 
+# Configure logging to reduce terminal clutter
+# Suppress Flask and SocketIO INFO logs (HTTP requests)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.WARNING)  # Only show warnings and errors from Flask
+socketio_log = logging.getLogger('socketio')
+socketio_log.setLevel(logging.WARNING)  # Only show warnings and errors from SocketIO
+engineio_log = logging.getLogger('engineio')
+engineio_log.setLevel(logging.WARNING)  # Only show warnings and errors from Engine.IO
+
 # Add paths for importing processing modules
 project_root = Path(__file__).parent
 stt_diarization_path = project_root / "stt_diarization"
