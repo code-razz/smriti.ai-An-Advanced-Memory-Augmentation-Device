@@ -40,7 +40,11 @@ sio = socketio.Client()
 
 @sio.event
 def connect():
-    print("✅ Connected to server")
+    print(f"✅ Connected to server. SID: {sio.sid}")
+
+@sio.event
+def reconnect():
+    print(f"🔄 Reconnected to server. New SID: {sio.sid}")
 
 @sio.event
 def disconnect():
@@ -61,8 +65,11 @@ playback_enabled.set()
 def on_server_audio_chunk(data):
     # Only accept and enqueue server chunks if playback is enabled
     if not playback_enabled.is_set():
-        # drop chunk if playback disabled
+        print(f"⚠️ Dropping audio chunk ({len(data)} bytes) because playback is disabled.")
         return
+    
+    # Debug: print every chunk size
+    # print(f"🔊 Rx chunk: {len(data)} bytes") 
     arr = np.frombuffer(data, dtype=np.int16)
     playback_queue.put(arr)
 
@@ -377,9 +384,11 @@ def perform_face_recognition():
 
     print("🚀 Sending to server for recognition...")
     try:
+        print(f"   (DEBUG) Using SocketIO SID: {sio.sid}")
         files = {'image': ('face.jpg', image_bytes, 'image/jpeg')}
+        data = {'sid': sio.sid} if sio.sid else {}
         # add a short timeout so the client doesn't hang if server is unreachable
-        response = requests.post(PROCESS_FACE_ENDPOINT, files=files, timeout=6.0)
+        response = requests.post(PROCESS_FACE_ENDPOINT, files=files, data=data, timeout=10.0)
         
         # Accept both 200 (recognized) and 201 (enrolled) as success
         if response.status_code not in [200, 201]:
@@ -395,9 +404,10 @@ def perform_face_recognition():
                 print(f"\n🆕 NEW PERSON ENROLLED: {name} 🆕")
             else:
                 print(f"\n✨ RECOGNIZED: {name} ✨")
-            # Optional: You could trigger a TTS greeting here via socketio if desired
-            # sio.emit("tts_speak", f"Hello {name}") 
             
+        elif status == "no_face":
+            print("\n⚠️ No face detected.")
+
         elif status == "unknown":
             print("\n❓ Face Unknown.")
             

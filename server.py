@@ -108,7 +108,7 @@ context_chunk_count = {}         # sid -> int: number of context chunks received
 finalizing_processing = {}       # sid -> bool: flag to indicate completion handler is running
 
 CHUNK_SIZE = 4096
-STREAM_DELAY = 0.04  # seconds between sending chunks (tune for latency vs jitter)
+STREAM_DELAY = 0.12  # seconds (increased to avoid flooding polling clients; ~real-time for 4096 bytes)
 
 
 @socketio.on("connect")
@@ -342,15 +342,19 @@ def process_and_stream_reply(sid, audio_data_bytes):
 
 def _generate_and_stream_tts(sid, text):
     """Helper to generate TTS for a text chunk and stream it."""
+    print(f"🎤 [TTS] Starting generation for {sid}: '{text}'")
     try:
         if not text.strip():
+            print("⚠️ [TTS] Empty text, skipping.")
             return
             
         # TTS (Edge-TTS)
         mp3_bytes = generate_tts(text)
         if not mp3_bytes:
-            print("⚠️ TTS generation failed.")
+            print("⚠️ [TTS] Generation failed (no bytes returned).")
             return
+        
+        print(f"✅ [TTS] Generated {len(mp3_bytes)} bytes (MP3). Converting to WAV...")
             
         mp3_fp = io.BytesIO(mp3_bytes)
         mp3_fp.seek(0)
@@ -361,26 +365,35 @@ def _generate_and_stream_tts(sid, text):
         wav_fp = io.BytesIO()
         audio.export(wav_fp, format="wav")
         wav_bytes = wav_fp.getvalue()
+        
+        print(f"✅ [TTS] Converted to WAV: {len(wav_bytes)} bytes. Streaming...")
 
         # Stream chunks
         total = len(wav_bytes)
         sent = 0
+        chunk_count = 0
         while sent < total:
             if reply_stream_stop_flags.get(sid, False):
-                print(f"⏹️ Streaming stopped by client request for {sid}")
+                print(f"⏹️ [TTS] Streaming stopped by client request for {sid}")
                 break
             end = min(sent + CHUNK_SIZE, total)
             chunk = wav_bytes[sent:end]
             try:
                 socketio.emit("server_audio_chunk", chunk, to=sid)
+                # print(f"   -> Sent chunk {chunk_count} ({len(chunk)} bytes) to {sid}")
             except Exception as e:
-                print(f"❌ Emit error: {e}")
+                print(f"❌ [TTS] Emit error: {e}")
                 break
             sent = end
+            chunk_count += 1
             time.sleep(STREAM_DELAY)
+        
+        print(f"✅ [TTS] Finished streaming to {sid} ({chunk_count} chunks).")
             
     except Exception as e:
-        print(f"❌ Error in TTS generation: {e}")
+        print(f"❌ [TTS] Error in TTS generation/streaming: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 
@@ -762,6 +775,7 @@ def process_face():
     POST multipart/form-data:
       - image: file
       - name: optional -> if present, we ENROLL, else we RECOGNIZE (and auto-enroll if unknown)
+      - sid: optional -> SocketIO session ID for TTS response
 
     JSON response:
       - status: "recognized" | "unknown" | "enrolled" | "error"
@@ -778,6 +792,7 @@ def process_face():
 
     file = request.files["image"]
     name = request.form.get("name")  # optional: triggers manual enrollment
+    sid = request.form.get("sid")    # optional: for TTS
 
     # Basic file validation
     if not allowed_file_mimetype(file.mimetype):
@@ -796,7 +811,24 @@ def process_face():
         face_locations = face_recognition.face_locations(image_np, model="hog")
 
         if not face_locations:
-            return jsonify({"status": "error", "message": "No face detected in image."}), 400
+            msg = "No face detected."
+            target_sid = sid
+            
+            # Fallback logic for SID mismatch
+            if sid and sid not in is_recording:
+                connected_clients = list(is_recording.keys())
+                if len(connected_clients) == 1:
+                    target_sid = connected_clients[0]
+                    print(f"⚠️ [TTS] SID mismatch (Req: {sid}, Conn: {target_sid}). Using fallback SID: {target_sid}")
+                else:
+                    print(f"⚠️ [TTS] Request SID {sid} not found and multiple/no clients connected: {connected_clients}")
+                    target_sid = None
+
+            if target_sid:
+                print(f"🗣️ Streaming TTS response to {target_sid}: {msg}")
+                socketio.start_background_task(_generate_and_stream_tts, target_sid, msg)
+            
+            return jsonify({"status": "no_face", "message": msg}), 200
 
         # If multiple faces, choose the largest face (most likely intended subject)
         def area(loc):
@@ -809,7 +841,10 @@ def process_face():
         # Generate embedding for the chosen face only
         face_encodings = face_recognition.face_encodings(image_np, [chosen_location], num_jitters=10)
         if not face_encodings:
-            return jsonify({"status": "error", "message": "Could not generate embedding."}), 400
+            msg = "Could not generate face embedding."
+            if sid:
+                 socketio.start_background_task(_generate_and_stream_tts, sid, "Error processing face.")
+            return jsonify({"status": "error", "message": msg}), 400
 
         embedding = face_encodings[0].tolist()  # convert to Python list for storage
 
@@ -825,15 +860,29 @@ def process_face():
             upload_result = upload_face_image(image_bytes, name)
             image_url = upload_result.get("secure_url") or upload_result.get("url")
             if not image_url:
-                logger.exception("Cloudinary upload failed: %s", upload_result)
+                logger.error("Cloudinary upload failed: %s", upload_result)
                 return jsonify({"status": "error", "message": "Failed to upload image to storage."}), 500
 
             # Enroll in vector DB
             success = enroll_face(name, embedding, image_url)
             if success:
+                if sid:
+                    target_sid = sid
+                    if sid not in is_recording:
+                        connected_clients = list(is_recording.keys())
+                        if len(connected_clients) == 1:
+                            target_sid = connected_clients[0]
+                            print(f"⚠️ [TTS] SID mismatch (Req: {sid}, Conn: {target_sid}). Using fallback SID.")
+                        else:
+                            target_sid = None
+                    
+                    if target_sid:
+                        tts_msg = f"New person enrolled successfully: {name}"
+                        print(f"🗣️ Streaming TTS response to {target_sid}: {tts_msg}")
+                        socketio.start_background_task(_generate_and_stream_tts, target_sid, tts_msg)
                 return jsonify({"status": "enrolled", "name": name, "image_url": image_url}), 201
             else:
-                logger.exception("Failed to save enrollment to vector DB for %s", name)
+                logger.error("Failed to save enrollment to vector DB for %s", name)
                 return jsonify({"status": "error", "message": "Failed to save to vector DB."}), 500
 
         # -----------------------------
@@ -845,10 +894,26 @@ def process_face():
             
             if match_metadata:
                 # Face Recognized
+                found_name = match_metadata.get("name")
+                if sid:
+                    target_sid = sid
+                    if sid not in is_recording:
+                        connected_clients = list(is_recording.keys())
+                        if len(connected_clients) == 1:
+                            target_sid = connected_clients[0]
+                            print(f"⚠️ [TTS] SID mismatch (Req: {sid}, Conn: {target_sid}). Using fallback SID.")
+                        else:
+                            target_sid = None
+                    
+                    if target_sid:
+                        tts_msg = f"The person is {found_name}"
+                        print(f"🗣️ Streaming TTS response to {target_sid}: {tts_msg}")
+                        socketio.start_background_task(_generate_and_stream_tts, target_sid, tts_msg)
+
                 return jsonify(
                     {
                         "status": "recognized",
-                        "name": match_metadata.get("name"),
+                        "name": found_name,
                         "image_url": match_metadata.get("image_url"),
                     }
                 )
@@ -870,6 +935,21 @@ def process_face():
                 # Enroll in vector DB
                 success = enroll_face(auto_name, embedding, image_url)
                 if success:
+                    if sid:
+                        target_sid = sid
+                        if sid not in is_recording:
+                            connected_clients = list(is_recording.keys())
+                            if len(connected_clients) == 1:
+                                target_sid = connected_clients[0]
+                                print(f"⚠️ [TTS] SID mismatch (Req: {sid}, Conn: {target_sid}). Using fallback SID.")
+                            else:
+                                target_sid = None
+                        
+                        if target_sid:
+                            tts_msg = "Face not recognized. Auto enrolled as new person."
+                            print(f"🗣️ Streaming TTS response to {target_sid}: {tts_msg}")
+                            socketio.start_background_task(_generate_and_stream_tts, target_sid, tts_msg)
+
                     return jsonify(
                         {
                             "status": "enrolled",  # Client can treat this as "recognized" if it wants, or show "New Person Added"
