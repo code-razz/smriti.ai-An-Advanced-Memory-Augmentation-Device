@@ -732,12 +732,26 @@ def expand_box(
     return top_new, right_new, bottom_new, left_new
 
 
+def prepare_face_image(image_np, location, img_h, img_w):
+    """Crops and expands the face image, returning JPEG bytes."""
+    top, right, bottom, left = location
+    top, right, bottom, left = expand_box(
+        top, right, bottom, left, img_h, img_w, current_app.config["FACE_CROP_MARGIN"]
+    )
+    face_np = image_np[top:bottom, left:right]
+    pil_face = Image.fromarray(face_np)
+    img_io = io.BytesIO()
+    pil_face.save(img_io, format="JPEG", quality=95)
+    img_io.seek(0)
+    return img_io.getvalue()
+
+
 @app.route("/process_face", methods=["POST"])
 def process_face():
     """
     POST multipart/form-data:
       - image: file
-      - name: optional -> if present, we ENROLL, else we RECOGNIZE
+      - name: optional -> if present, we ENROLL, else we RECOGNIZE (and auto-enroll if unknown)
 
     JSON response:
       - status: "recognized" | "unknown" | "enrolled" | "error"
@@ -753,7 +767,7 @@ def process_face():
         return jsonify({"status": "error", "message": "No image file provided."}), 400
 
     file = request.files["image"]
-    name = request.form.get("name")  # optional: triggers enrollment
+    name = request.form.get("name")  # optional: triggers manual enrollment
 
     # Basic file validation
     if not allowed_file_mimetype(file.mimetype):
@@ -789,32 +803,22 @@ def process_face():
 
         embedding = face_encodings[0].tolist()  # convert to Python list for storage
 
-        # Enrollment flow
+        # -----------------------------
+        # 1. Manual Enrollment (Name provided)
+        # -----------------------------
         if name:
-            logger.info("Enrolling new face: %s", name)
+            logger.info("Enrolling new face (Manual): %s", name)
+            
+            image_bytes = prepare_face_image(image_np, chosen_location, img_h, img_w)
 
-            # Crop and expand a bit
-            top, right, bottom, left = chosen_location
-            top, right, bottom, left = expand_box(
-                top, right, bottom, left, img_h, img_w, current_app.config["FACE_CROP_MARGIN"]
-            )
-            face_np = image_np[top:bottom, left:right]
-
-            # Convert to JPEG bytes
-            pil_face = Image.fromarray(face_np)
-            img_io = io.BytesIO()
-            pil_face.save(img_io, format="JPEG", quality=95)
-            img_io.seek(0)
-            image_bytes = img_io.getvalue()
-
-            # Upload to Cloudinary (your helper should return a dict with secure_url)
+            # Upload to Cloudinary
             upload_result = upload_face_image(image_bytes, name)
             image_url = upload_result.get("secure_url") or upload_result.get("url")
             if not image_url:
                 logger.exception("Cloudinary upload failed: %s", upload_result)
                 return jsonify({"status": "error", "message": "Failed to upload image to storage."}), 500
 
-            # Enroll in vector DB (Pinecone / whatever) via helper
+            # Enroll in vector DB
             success = enroll_face(name, embedding, image_url)
             if success:
                 return jsonify({"status": "enrolled", "name": name, "image_url": image_url}), 201
@@ -822,11 +826,15 @@ def process_face():
                 logger.exception("Failed to save enrollment to vector DB for %s", name)
                 return jsonify({"status": "error", "message": "Failed to save to vector DB."}), 500
 
-        # Recognition flow
+        # -----------------------------
+        # 2. Recognition + Auto-Enrollment
+        # -----------------------------
         else:
             logger.info("Recognizing face...")
             match_metadata = search_face(embedding)
+            
             if match_metadata:
+                # Face Recognized
                 return jsonify(
                     {
                         "status": "recognized",
@@ -835,7 +843,34 @@ def process_face():
                     }
                 )
             else:
-                return jsonify({"status": "unknown", "message": "No match found."}), 200
+                # Face Unknown -> Auto-Enroll
+                auto_name = f"Person_{int(time.time())}"
+                logger.info("Face unknown. Auto-enrolling as: %s", auto_name)
+                
+                image_bytes = prepare_face_image(image_np, chosen_location, img_h, img_w)
+                
+                # Upload to Cloudinary
+                upload_result = upload_face_image(image_bytes, auto_name)
+                image_url = upload_result.get("secure_url") or upload_result.get("url")
+                
+                if not image_url:
+                    logger.error("Auto-enrollment Cloudinary upload failed.")
+                    return jsonify({"status": "error", "message": "Auto-enrollment failed (storage)."}), 500
+                
+                # Enroll in vector DB
+                success = enroll_face(auto_name, embedding, image_url)
+                if success:
+                    return jsonify(
+                        {
+                            "status": "enrolled",  # Client can treat this as "recognized" if it wants, or show "New Person Added"
+                            "name": auto_name,
+                            "image_url": image_url,
+                            "message": "Unknown face auto-enrolled."
+                        }
+                    ), 201
+                else:
+                    logger.error("Auto-enrollment Pinecone save failed.")
+                    return jsonify({"status": "error", "message": "Auto-enrollment failed (DB)."}), 500
 
     except Exception as exc:
         logger.exception("Error in /process_face: %s", exc)
