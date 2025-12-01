@@ -9,7 +9,7 @@ from utils import load_and_resample
 from pinecone_utils import get_pinecone_index
 from pinecone_utils import find_matching_speaker
 from diarizer import load_diarizer, diarize_audio
-from transcriber import load_whisper_model, transcribe_audio
+from transcriber import load_whisper_model, transcribe_audio 
 from itertools import groupby
 
 # Ensure output directory exists

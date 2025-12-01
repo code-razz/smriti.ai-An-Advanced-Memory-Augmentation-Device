@@ -1,22 +1,3 @@
-google-generativeai
-gtts
-pygame
-python-dotenv
-
-
-#requirements for server.py
-
-Flask==3.1.2
-Flask-SocketIO==5.5.1
-
-numpy==2.3.3
-pydub==0.25.1
-python-socketio==5.13.0
-
-python-engineio
-eventlet
-
-
 # Core ML/AI frameworks
 torch>=2.0.0
 torchaudio>=2.0.0
@@ -37,6 +18,8 @@ cohere>=5.0.0
 
 # Environment and configuration
 python-dotenv>=1.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.24.0
 
 # Audio processing dependencies
 # librosa>=0.10.0  # Commented out due to Windows compatibility issues
