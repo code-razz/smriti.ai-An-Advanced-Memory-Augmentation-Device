@@ -15,7 +15,7 @@ MEETING_AUDIO_FILE = PROJECT_DIR / "zapp_3_5_20.wav"   # Audio file to diarize a
 # MEETING_AUDIO_FILE = PROJECT_DIR / "videoplayback (1).wav"   # Audio file to diarize and transcribe (update accordingly)
 
 # Model and pipeline names for loading pretrained models
-WHISPER_MODEL_NAME = "tiny"
+WHISPER_MODEL_NAME = "base"
 PYANNOTE_PIPELINE = "pyannote/speaker-diarization-3.1"
 SPEECHBRAIN_MODEL = "speechbrain/spkrec-ecapa-voxceleb"  # Speaker recognition model
 
