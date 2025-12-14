@@ -185,6 +185,7 @@ def handle_audio_chunk(data):
         is_recording[sid] = True
         query_chunk_count[sid] = 0
         print(f"\n🆕 [QueryStream] Starting new recording for {sid}")
+        print(f"🕒[PERF] Query Receiving Started at {time.strftime('%H:%M:%S')}")
 
     partial_audio[sid].extend(data)
     query_chunk_count[sid] = query_chunk_count.get(sid, 0) + 1
@@ -199,6 +200,7 @@ def handle_audio_complete():
     Client indicated query recording finished. Save WAV and start streaming reply back in a background task.
     """
     sid = request.sid
+    print(f"🕒[PERF] Query Receiving Completed at {time.strftime('%H:%M:%S')}")
     data = partial_audio.get(sid, None)
     if not data:
         print(f"⚠️ audio_complete received but no query data for {sid}")
@@ -245,6 +247,7 @@ def tts_worker(text_queue, audio_queue, sid):
                 break
             
             print(f"🎤 [TTS Worker] Processing chunk: '{text_chunk[:20]}...'")
+            print(f"🕒[PERF] TTS Generation Started at {time.strftime('%H:%M:%S')}")
             start_time = time.time()
             
             mp3_bytes = generate_tts(text_chunk)
@@ -260,6 +263,7 @@ def tts_worker(text_queue, audio_queue, sid):
                 wav_bytes = wav_fp.getvalue()
                 
                 audio_queue.put(wav_bytes)
+                print(f"🕒[PERF] TTS Generation Completed in {time.time() - start_time:.4f}s")
                 print(f"✅ [TTS Worker] Pushed {len(wav_bytes)} bytes to Audio Queue (Time: {time.time() - start_time:.2f}s)")
             else:
                  print("⚠️ [TTS Worker] TTS generation failed for chunk.")
@@ -290,6 +294,7 @@ def stream_worker(audio_queue, sid):
             sent = 0
             
             # Streaming loop for this specific audio segment
+            print(f"🕒[PERF] Sending response to client (Streaming Started) at {time.strftime('%H:%M:%S')}")
             while sent < total:
                 if reply_stream_stop_flags.get(sid, False):
                     print(f"⏹️ [Stream Worker] Stopped by flag for {sid}")
@@ -333,10 +338,13 @@ def process_and_stream_reply(sid, audio_data_bytes):
             _, _, whisper_model, _ = get_models()
             
             print("📝 Transcribing query (In-Memory)...")
+            print(f"🕒[PERF] STT Started at {time.strftime('%H:%M:%S')}")
+            stt_start = time.time()
             audio_np = np.frombuffer(audio_data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             
             result = transcribe_audio(whisper_model, audio_np)
             query_text = result["text"].strip()
+            print(f"🕒[PERF] STT Ended in {time.time() - stt_start:.4f}s")
             print(f"🗣️ Query: {query_text}")
 
             if not query_text:

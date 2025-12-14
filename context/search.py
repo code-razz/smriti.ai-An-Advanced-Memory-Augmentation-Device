@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 import cohere
 from pinecone import Pinecone
+import time
 
 load_dotenv()
 
@@ -40,6 +41,8 @@ def get_query_and_memories(query_text=None):
     ).embeddings[0]
 
     # Query top 3
+    print(f"🕒[PERF] Pinecone Fetch Started at {time.strftime('%H:%M:%S')}")
+    pf_start = time.time()
     results = index.query(
         namespace="conversations",
         vector=query_embedding,
@@ -47,8 +50,10 @@ def get_query_and_memories(query_text=None):
         include_values=False,
         include_metadata=True
     )
+    print(f"🕒[PERF] Pinecone Fetch Completed in {time.time() - pf_start:.4f}s")
 
     # Display results
+    print("\n=====================================================================")
     print("\n🔍 Top Matches:")
     memories = []
     for match in results["matches"]:
@@ -69,5 +74,7 @@ def get_query_and_memories(query_text=None):
         print(f"Participants: {match['metadata'].get('participants')}")
         print(f"Timestamp: {match['metadata'].get('timestamp')}")
         print(f"Conversation ID: {match['metadata'].get('conversation_id')}")
+
+    print("\n=====================================================================")
         
     return query, memories

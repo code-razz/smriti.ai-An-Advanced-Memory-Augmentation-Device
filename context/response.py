@@ -6,6 +6,7 @@ from datetime import datetime
 import google.generativeai as genai
 from prompt import RESPONDER_PROMPT
 from search import get_query_and_memories
+import time
 
 # ✅ Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
@@ -68,9 +69,14 @@ def generate_answer_stream(query_text=None):
 
     # ✅ Generate response using Gemini (Streaming)
     try:
+        print(f"🕒[PERF] Sent to LLM for answer at {time.strftime('%H:%M:%S')}")
+        llm_start = time.time()
         response = model.generate_content(prompt_text, stream=True)
         print("\n--- AISmriti Answer (Streaming) ---")
         for chunk in response:
+            if llm_start:
+                 print(f"🕒[PERF] Received First LLM Token in {time.time() - llm_start:.4f}s")
+                 llm_start = None # Only log once
             text_chunk = chunk.text
             print(text_chunk, end="", flush=True)
             yield text_chunk

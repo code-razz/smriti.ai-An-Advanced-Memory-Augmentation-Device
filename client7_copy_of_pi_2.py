@@ -308,7 +308,7 @@ def get_face_image_bytes():
     Captures an image from the camera using picamera2.
     Captures 5 frames (Smart Burst) and selects the sharpest one using Laplacian variance.
     """
-    print("📷 Opening camera...")
+    ("📷 Opening camera...")
     picam2 = Picamera2()
     
     try:

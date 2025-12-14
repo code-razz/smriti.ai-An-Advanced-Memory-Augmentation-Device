@@ -35,7 +35,9 @@ MARGIN = 0.25
 
 # Select device based on CUDA availability or environment variables
 # Select device based on CUDA availability or environment variables
-DEVICE = "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") or os.getenv("CUDA_DEVICE") else "cpu"
+import torch
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"✅ STT Config: Using device: {DEVICE}")
 
 # Cloudinary Credentials
 CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
