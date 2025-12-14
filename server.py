@@ -25,6 +25,7 @@ from pathlib import Path
 
 import logging
 from typing import Optional, Tuple
+import queue
 
 from PIL import Image
 
@@ -228,9 +229,102 @@ def handle_audio_complete():
         print(f"⚠️ No data for {sid}, cannot process query.")
 
 
+
+def tts_worker(text_queue, audio_queue, sid):
+    """
+    Worker thread: Pulls text chunks, generates TTS audio, pushes audio chunks.
+    """
+    print(f"🧵 [TTS Worker] Started for {sid}")
+    while True:
+        try:
+            # timeout ensures we don't hang forever if something goes wrong
+            text_chunk = text_queue.get(timeout=60) 
+            if text_chunk is None:  # Sentinel
+                print(f"🛑 [TTS Worker] Received sentinel for {sid}")
+                audio_queue.put(None)
+                break
+            
+            print(f"🎤 [TTS Worker] Processing chunk: '{text_chunk[:20]}...'")
+            start_time = time.time()
+            
+            mp3_bytes = generate_tts(text_chunk)
+            
+            if mp3_bytes:
+                mp3_fp = io.BytesIO(mp3_bytes)
+                mp3_fp.seek(0)
+                # Convert to WAV 16kHz Mono (pydub)
+                audio = AudioSegment.from_file(mp3_fp, format="mp3")
+                audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+                wav_fp = io.BytesIO()
+                audio.export(wav_fp, format="wav")
+                wav_bytes = wav_fp.getvalue()
+                
+                audio_queue.put(wav_bytes)
+                print(f"✅ [TTS Worker] Pushed {len(wav_bytes)} bytes to Audio Queue (Time: {time.time() - start_time:.2f}s)")
+            else:
+                 print("⚠️ [TTS Worker] TTS generation failed for chunk.")
+
+        except queue.Empty:
+            print(f"⚠️ [TTS Worker] Queue empty timeout for {sid}")
+            break
+        except Exception as e:
+            print(f"❌ [TTS Worker] Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+def stream_worker(audio_queue, sid):
+    """
+    Worker thread: Pulls audio chunks/files, streams to client.
+    """
+    print(f"🧵 [Stream Worker] Started for {sid}")
+    while True:
+        try:
+            audio_bytes = audio_queue.get(timeout=60)
+            if audio_bytes is None: # Sentinel
+                print(f"🛑 [Stream Worker] Received sentinel for {sid}")
+                break
+            
+            # Stream this chunk of audio
+            chunk_size = CHUNK_SIZE
+            total = len(audio_bytes)
+            sent = 0
+            
+            # Streaming loop for this specific audio segment
+            while sent < total:
+                if reply_stream_stop_flags.get(sid, False):
+                    print(f"⏹️ [Stream Worker] Stopped by flag for {sid}")
+                    return
+                
+                end = min(sent + chunk_size, total)
+                chunk = audio_bytes[sent:end]
+                try:
+                    socketio.emit("server_audio_chunk", chunk, to=sid)
+                except Exception as e:
+                    print(f"❌ [Stream Worker] Emit error: {e}")
+                    return
+                
+                sent = end
+                time.sleep(STREAM_DELAY)
+            
+        except queue.Empty:
+            print(f"⚠️ [Stream Worker] Queue empty timeout for {sid}")
+            break
+        except Exception as e:
+            print(f"❌ [Stream Worker] Error: {e}")
+            break
+            
+    # Send completion signal at very end
+    try:
+        if not reply_stream_stop_flags.get(sid, False):
+            socketio.emit("server_audio_complete", to=sid)
+    except Exception:
+        pass
+    print(f"✅ [Stream Worker] Finished for {sid}")
+
 def process_and_stream_reply(sid, audio_data_bytes):
     """
     Process the query audio: STT (In-Memory) -> LLM (Stream) -> TTS (Stream) -> Stream.
+    Uses threaded pipeline.
     """
     print(f"🧠 Processing query for {sid} (In-Memory)")
     try:
@@ -239,8 +333,6 @@ def process_and_stream_reply(sid, audio_data_bytes):
             _, _, whisper_model, _ = get_models()
             
             print("📝 Transcribing query (In-Memory)...")
-            # Convert PCM bytes to float32 numpy array for Whisper
-            # Assumes 16-bit PCM, 16kHz
             audio_np = np.frombuffer(audio_data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             
             result = transcribe_audio(whisper_model, audio_np)
@@ -252,11 +344,21 @@ def process_and_stream_reply(sid, audio_data_bytes):
                 stream_reply_to_client(sid)
                 return
 
-            # 2. Generate Answer & Stream TTS
-            print("🤔 Generating answer (Streaming)...")
+            # 2. Pipeline Setup
+            text_queue = queue.Queue()
+            audio_queue = queue.Queue()
+            
+            # Start threads
+            t_tts = threading.Thread(target=tts_worker, args=(text_queue, audio_queue, sid))
+            t_stream = threading.Thread(target=stream_worker, args=(audio_queue, sid))
+            
+            t_tts.start()
+            t_stream.start()
+
+            # 3. Generate Answer & Push to Text Queue
+            print("🤔 Generating answer (Streaming into Pipeline)...")
             
             text_buffer = ""
-            # Added comma and other punctuation for faster chunking
             sentence_endings = ['.', '?', '!', '.\n', '?\n', '!\n', ',', ':', ';']
             
             start_time = time.time()
@@ -270,12 +372,14 @@ def process_and_stream_reply(sid, audio_data_bytes):
                 
                 text_buffer += chunk_text
                 
-                # Aggressive split for the very first chunk to reduce latency
+                # Logic to cut chunks for TTS
+                should_push = False
+                segment_to_push = ""
+                
                 if is_first_chunk:
                     words = text_buffer.split()
-                    if len(words) >= 5:  # Wait for at least 5 words
-                        # Find the position of the 5th space to cut strictly there
-                        # This ensures we don't process a huge chunk if the LLM yields a lot at once
+                    if len(words) >= 5:
+                         # Same logic as before: strict 5 words to get audio out fast
                         split_index = -1
                         space_count = 0
                         for i, char in enumerate(text_buffer):
@@ -284,49 +388,46 @@ def process_and_stream_reply(sid, audio_data_bytes):
                                 if space_count == 5:
                                     split_index = i
                                     break
-                        
                         if split_index != -1:
-                            sentence_to_speak = text_buffer[:split_index].strip()
-                            remaining_text = text_buffer[split_index:]
-                            
-                            print(f"\n🗣️ TTS First Phrase (Strict 5 words): {sentence_to_speak}")
-                            tts_start = time.time()
-                            _generate_and_stream_tts(sid, sentence_to_speak)
-                            print(f"⏱️ TTS processing time (First): {time.time() - tts_start:.2f}s")
-                            
-                            text_buffer = remaining_text
+                            segment_to_push = text_buffer[:split_index].strip()
+                            text_buffer = text_buffer[split_index:]
+                            should_push = True
                             is_first_chunk = False
-                    continue
 
-                # Normal splitting for subsequent chunks
-                last_punct_idx = -1
-                for punct in sentence_endings:
-                    idx = text_buffer.rfind(punct)
-                    if idx != -1 and idx > last_punct_idx:
-                        last_punct_idx = idx + len(punct)
+                if not should_push: # Normal sentence processing
+                     last_punct_idx = -1
+                     for punct in sentence_endings:
+                        idx = text_buffer.rfind(punct)
+                        if idx != -1 and idx > last_punct_idx:
+                            last_punct_idx = idx + len(punct)
+                     
+                     if last_punct_idx != -1:
+                        pot_segment = text_buffer[:last_punct_idx].strip()
+                        if pot_segment:
+                             # Don't split if too short (unless EOF coming, but here we are streaming)
+                             if len(pot_segment) >= 5 or pot_segment[-1] in ['.', '?', '!']:
+                                 segment_to_push = pot_segment
+                                 text_buffer = text_buffer[last_punct_idx:]
+                                 should_push = True
                 
-                if last_punct_idx != -1:
-                    sentence_to_speak = text_buffer[:last_punct_idx].strip()
-                    remaining_text = text_buffer[last_punct_idx:]
-                    
-                    if sentence_to_speak:
-                        # Don't split if it's too short unless it's a real sentence end
-                        if len(sentence_to_speak) < 5 and sentence_to_speak[-1] not in ['.', '?', '!']:
-                            continue
-                            
-                        print(f"\n🗣️ TTS Phrase: {sentence_to_speak}")
-                        tts_start = time.time()
-                        _generate_and_stream_tts(sid, sentence_to_speak)
-                        print(f"⏱️ TTS processing time: {time.time() - tts_start:.2f}s")
-                    
-                    text_buffer = remaining_text
-            
-            # Process any remaining text
+                if should_push and segment_to_push:
+                    print(f"➡️ [Main] Pushing to Text Queue: '{segment_to_push}'")
+                    text_queue.put(segment_to_push)
+
+            # Process remaining text
             if text_buffer.strip():
-                print(f"\n🗣️ TTS Final Chunk: {text_buffer}")
-                _generate_and_stream_tts(sid, text_buffer)
+                print(f"➡️ [Main] Pushing Final Chunk: '{text_buffer}'")
+                text_queue.put(text_buffer)
+            
+            # Send Sentinel to TTS
+            print("🛑 [Main] LLM Stream Finished. Sending Sentinel to TTS.")
+            text_queue.put(None)
+            
+            # Wait for threads to finish (optional, but good for cleanliness)
+            t_tts.join()
+            t_stream.join()
                 
-            print(f"✅ Finished streaming reply to {sid}. Total time: {time.time() - start_time:.2f}s")
+            print(f"✅ Finished streaming reply to {sid}. Total pipeline time: {time.time() - start_time:.2f}s")
 
         else:
             print("⚠️ Processing modules not available, sending default reply.")
@@ -336,64 +437,8 @@ def process_and_stream_reply(sid, audio_data_bytes):
         print(f"❌ Error in process_and_stream_reply: {e}")
         import traceback
         traceback.print_exc()
-        # Fallback to default reply on error
         stream_reply_to_client(sid)
 
-
-def _generate_and_stream_tts(sid, text):
-    """Helper to generate TTS for a text chunk and stream it."""
-    print(f"🎤 [TTS] Starting generation for {sid}: '{text}'")
-    try:
-        if not text.strip():
-            print("⚠️ [TTS] Empty text, skipping.")
-            return
-            
-        # TTS (Edge-TTS)
-        mp3_bytes = generate_tts(text)
-        if not mp3_bytes:
-            print("⚠️ [TTS] Generation failed (no bytes returned).")
-            return
-        
-        print(f"✅ [TTS] Generated {len(mp3_bytes)} bytes (MP3). Converting to WAV...")
-            
-        mp3_fp = io.BytesIO(mp3_bytes)
-        mp3_fp.seek(0)
-
-        # Convert to WAV 16kHz Mono
-        audio = AudioSegment.from_file(mp3_fp, format="mp3")
-        audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
-        wav_fp = io.BytesIO()
-        audio.export(wav_fp, format="wav")
-        wav_bytes = wav_fp.getvalue()
-        
-        print(f"✅ [TTS] Converted to WAV: {len(wav_bytes)} bytes. Streaming...")
-
-        # Stream chunks
-        total = len(wav_bytes)
-        sent = 0
-        chunk_count = 0
-        while sent < total:
-            if reply_stream_stop_flags.get(sid, False):
-                print(f"⏹️ [TTS] Streaming stopped by client request for {sid}")
-                break
-            end = min(sent + CHUNK_SIZE, total)
-            chunk = wav_bytes[sent:end]
-            try:
-                socketio.emit("server_audio_chunk", chunk, to=sid)
-                # print(f"   -> Sent chunk {chunk_count} ({len(chunk)} bytes) to {sid}")
-            except Exception as e:
-                print(f"❌ [TTS] Emit error: {e}")
-                break
-            sent = end
-            chunk_count += 1
-            time.sleep(STREAM_DELAY)
-        
-        print(f"✅ [TTS] Finished streaming to {sid} ({chunk_count} chunks).")
-            
-    except Exception as e:
-        print(f"❌ [TTS] Error in TTS generation/streaming: {e}")
-        import traceback
-        traceback.print_exc()
 
 
 

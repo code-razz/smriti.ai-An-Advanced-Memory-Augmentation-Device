@@ -11,6 +11,7 @@ from search import get_query_and_memories
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 # ✅ Initialize Gemini model
+# model = genai.GenerativeModel("gemini-2.5-flash-lite")
 model = genai.GenerativeModel("gemini-2.5-flash")
 # model = genai.GenerativeModel("gemini-2.0-flash")
 
