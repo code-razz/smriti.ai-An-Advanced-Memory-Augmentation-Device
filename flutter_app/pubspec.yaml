@@ -36,6 +36,8 @@ dependencies:
   cupertino_icons: ^1.0.8
   http: ^1.2.2
   audioplayers: ^6.5.1
+  flutter_local_notifications: ^17.1.2
+
 
 dev_dependencies:
   flutter_test:
