@@ -69,17 +69,25 @@ def generate_answer_stream(query_text=None):
 
     # ✅ Generate response using Gemini (Streaming)
     try:
-        print(f"🕒[PERF] Sent to LLM for answer at {time.strftime('%H:%M:%S')}")
+        print(f"\n🕒[PERF] Sent to LLM for answer at {time.strftime('%H:%M:%S')}")
         llm_start = time.time()
         response = model.generate_content(prompt_text, stream=True)
         print("\n--- AISmriti Answer (Streaming) ---")
         for chunk in response:
             if llm_start:
-                 print(f"🕒[PERF] Received First LLM Token in {time.time() - llm_start:.4f}s")
+                 print(f"\n🕒[PERF] Received First LLM Token at {time.strftime('%H:%M:%S')}")
+                 print(f"\n🕒[PERF] Received First LLM Token in {time.time() - llm_start:.4f}s")
                  llm_start = None # Only log once
-            text_chunk = chunk.text
-            print(text_chunk, end="", flush=True)
-            yield text_chunk
+            
+            # Safe access to text
+            try:
+                text_chunk = chunk.text
+            except Exception:
+                text_chunk = ""
+            
+            if text_chunk:
+                print(text_chunk, end="", flush=True)
+                yield text_chunk
     except Exception as e:
         print("❌ Error during Gemini execution:", e)
         yield "Sorry, I couldn’t generate a response."

@@ -33,15 +33,19 @@ def get_query_and_memories(query_text=None):
     # query = "What did the user say about the medicine and doctor?"
     # query = "Whose point was that people will be lazy?"
 
-    # Embed query (✅ FIXED)
+    # Embed query
+    print(f"🕒 [PERF] Embedding (Cohere) Started at {time.strftime('%H:%M:%S')}")
+    emb_start = time.time()
     query_embedding = co.embed(
         texts=[query],
         input_type="search_query",
         model="embed-english-v3.0"
     ).embeddings[0]
+    print(f"🕒 [PERF] Embedding (Cohere) Completed at {time.strftime('%H:%M:%S')}")
+    print(f"🕒 [PERF] Embedding (Cohere) Completed in {time.time() - emb_start:.4f}s")
 
     # Query top 3
-    print(f"🕒[PERF] Pinecone Fetch Started at {time.strftime('%H:%M:%S')}")
+    print(f"🕒 [PERF] Vector Search (Pinecone) Started at {time.strftime('%H:%M:%S')}")
     pf_start = time.time()
     results = index.query(
         namespace="conversations",
@@ -50,7 +54,8 @@ def get_query_and_memories(query_text=None):
         include_values=False,
         include_metadata=True
     )
-    print(f"🕒[PERF] Pinecone Fetch Completed in {time.time() - pf_start:.4f}s")
+    print(f"🕒 [PERF] Vector Search (Pinecone) Completed at {time.strftime('%H:%M:%S')}")
+    print(f"🕒 [PERF] Vector Search (Pinecone) Completed in {time.time() - pf_start:.4f}s")
 
     # Display results
     print("\n=====================================================================")
