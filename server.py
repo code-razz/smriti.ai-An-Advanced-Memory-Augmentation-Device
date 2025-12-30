@@ -79,7 +79,7 @@ OVERLAP_BYTES = int(OVERLAP_SECONDS * BYTES_PER_SECOND)
 # -----------------------------
 # Load reply WAV (16kHz, mono, 16-bit)
 # -----------------------------
-with open("reply_16k.wav", "rb") as f:
+with open("default_reply_for_query (2).wav", "rb") as f:
     SAMPLE_REPLY = f.read()
 
 # -----------------------------
@@ -822,6 +822,34 @@ def prepare_face_image(image_np, location, img_h, img_w):
     pil_face.save(img_io, format="JPEG", quality=95)
     img_io.seek(0)
     return img_io.getvalue()
+
+
+def _generate_and_stream_tts(sid, text):
+    """
+    Helper to generate TTS and stream it to the client for face recognition events.
+    Run this in a background task.
+    """
+    try:
+        print(f"🗣️ [TTS Helper] Generating TTS for {sid}: '{text}'")
+        mp3_bytes = generate_tts(text)
+        if mp3_bytes:
+            # Convert to WAV 16kHz Mono
+            mp3_fp = io.BytesIO(mp3_bytes)
+            mp3_fp.seek(0)
+            audio = AudioSegment.from_file(mp3_fp, format="mp3")
+            audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            wav_fp = io.BytesIO()
+            audio.export(wav_fp, format="wav")
+            wav_bytes = wav_fp.getvalue()
+            
+            stream_reply_to_client(sid, wav_bytes)
+        else:
+            print(f"⚠️ [TTS Helper] Failed to generate TTS for {sid}")
+            
+    except Exception as e:
+        print(f"❌ [TTS Helper] Error generating/streaming TTS: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @app.route("/process_face", methods=["POST"])
